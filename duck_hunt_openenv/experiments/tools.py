@@ -41,8 +41,8 @@ SHOOT_TOOL = {
 # List of all tools for the agent
 DUCK_HUNT_TOOLS = [SHOOT_TOOL]
 
-# System prompt for the VLM agent
-SYSTEM_PROMPT = """You are a Duck Hunt game AI agent. Your goal is to shoot flying ducks.
+# System prompt template for the VLM agent
+SYSTEM_PROMPT_TEMPLATE = """You are a Duck Hunt game AI agent. Your goal is to shoot flying ducks.
 
 GAME RULES:
 - Two ducks fly around the screen at a time
@@ -53,7 +53,7 @@ GAME RULES:
 - Match lasts 30 seconds
 
 OBSERVATION:
-- You receive 4 consecutive frames showing duck movement
+- You receive {num_frames} consecutive frames showing duck movement
 - Use frame sequence to estimate duck velocity and direction
 - Screen size: 800x500 pixels
 
@@ -66,3 +66,12 @@ STRATEGY:
 - Use higher horizon (10-20) for fast-moving ducks
 
 ALWAYS call the shoot tool with your best prediction."""
+
+
+def get_system_prompt(num_frames: int) -> str:
+    """Generate system prompt with the specified number of frames."""
+    return SYSTEM_PROMPT_TEMPLATE.format(num_frames=num_frames)
+
+
+# Default system prompt for backward compatibility
+SYSTEM_PROMPT = get_system_prompt(4)

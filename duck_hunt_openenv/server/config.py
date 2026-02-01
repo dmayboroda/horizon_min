@@ -34,7 +34,9 @@ BOUNCE_BOTTOM_DY_MAX = -2
 
 # OPENENV SPECIFIC
 FRAME_OUTPUT_SIZE = (512, 512)  # Resized for VLM
-FRAMES_PER_OBSERVATION = 4  # Number of frames per observation
+FRAMES_PER_OBSERVATION = 4  # Number of frames per observation (default)
+FRAMES_PER_OBSERVATION_MIN = 2  # Minimum frames for random range
+FRAMES_PER_OBSERVATION_MAX = 6  # Maximum frames for random range
 MAX_HORIZON = 30  # Maximum horizon VLM can use
 LATENCY_OPTIONS_MS = [100, 200, 300, 400, 500, 600]
 

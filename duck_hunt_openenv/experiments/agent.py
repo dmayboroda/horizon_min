@@ -2,6 +2,7 @@
 
 import json
 import base64
+import random
 from io import BytesIO
 from dataclasses import dataclass
 
@@ -9,7 +10,8 @@ import weave
 from PIL import Image
 from openai import OpenAI
 
-from .tools import DUCK_HUNT_TOOLS, SYSTEM_PROMPT
+from .tools import DUCK_HUNT_TOOLS, get_system_prompt
+from ..server.config import FRAMES_PER_OBSERVATION_MIN, FRAMES_PER_OBSERVATION_MAX
 
 
 def pil_to_base64(image: Image.Image) -> str:
@@ -42,8 +44,14 @@ class DuckHuntVLMAgent(weave.Model):
     model_name: str = "gpt-4o"
     temperature: float = 0.0
     max_tokens: int = 256
+    num_frames: int = 4  # Number of frames for observation (tracked by Weave)
 
     def __init__(self, **kwargs):
+        # If num_frames not specified, randomly select from configured range
+        if "num_frames" not in kwargs:
+            kwargs["num_frames"] = random.randint(
+                FRAMES_PER_OBSERVATION_MIN, FRAMES_PER_OBSERVATION_MAX
+            )
         super().__init__(**kwargs)
         self._client = None
 
@@ -102,12 +110,13 @@ Analyze the frames and call the shoot tool with your prediction."""
         content.append({"type": "text", "text": text_prompt})
 
         # Call OpenAI with tool
+        system_prompt = get_system_prompt(self.num_frames)
         response = self.client.chat.completions.create(
             model=self.model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
             tools=DUCK_HUNT_TOOLS,
@@ -146,16 +155,28 @@ def vlm_predict_shot(
     game_state: dict | None = None,
     model_name: str = "gpt-4o",
     temperature: float = 0.0,
+    num_frames: int | None = None,
 ) -> dict:
     """
     Standalone function to predict shot using VLM.
 
+    Args:
+        frames: List of observation frames
+        game_state: Optional game state context
+        model_name: OpenAI model to use
+        temperature: Sampling temperature
+        num_frames: Number of frames (if None, randomly selected from config range)
+
     Returns dict compatible with environment step().
     """
-    agent = DuckHuntVLMAgent(
-        model_name=model_name,
-        temperature=temperature,
-    )
+    agent_kwargs = {
+        "model_name": model_name,
+        "temperature": temperature,
+    }
+    if num_frames is not None:
+        agent_kwargs["num_frames"] = num_frames
+
+    agent = DuckHuntVLMAgent(**agent_kwargs)
     prediction = agent.predict(frames, game_state)
 
     return {
@@ -163,4 +184,5 @@ def vlm_predict_shot(
         "y": prediction.y,
         "horizon": prediction.horizon,
         "confidence": prediction.confidence,
+        "num_frames": agent.num_frames,  # Include in output for tracking
     }
