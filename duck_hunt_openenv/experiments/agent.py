@@ -1,17 +1,22 @@
 """VLM Agent with OpenAI Tool Calls and Weave Tracking."""
 
+import sys
 import json
 import base64
 import random
 from io import BytesIO
 from dataclasses import dataclass
+from pathlib import Path
+
+# Add server to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
 
 import weave
 from PIL import Image
 from openai import OpenAI
 
 from .tools import DUCK_HUNT_TOOLS, get_system_prompt
-from ..server.config import FRAMES_PER_OBSERVATION_MIN, FRAMES_PER_OBSERVATION_MAX
+from config import FRAMES_PER_OBSERVATION_MIN, FRAMES_PER_OBSERVATION_MAX
 
 
 def pil_to_base64(image: Image.Image) -> str:

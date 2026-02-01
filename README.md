@@ -1,5 +1,7 @@
 # Horizon Min - Duck Hunt VLM Environment
 
+![Duck Hunt](duckhunt.webp)
+
 A headless Duck Hunt game environment designed for training and evaluating Vision Language Models (VLMs). This project provides an API-first implementation of the classic Nintendo Duck Hunt game as a research platform for AI agents.
 
 ## Project Structure

@@ -174,12 +174,22 @@ def run_live_evaluation(
     agent: DuckHuntVLMAgent,
     num_episodes: int = 5,
     max_steps: int = 100,
+    name: str | None = None,
 ) -> dict:
     """
     Run live evaluation where predictions are actually executed.
 
     This gives real hit/miss results rather than just prediction quality.
+
+    Args:
+        agent: The VLM agent to evaluate
+        num_episodes: Number of episodes to run
+        max_steps: Max steps per episode
+        name: Optional name for this evaluation run
     """
+    eval_name = name or f"live-eval-{num_episodes}ep"
+    print(f"Evaluation: {eval_name}")
+
     env = DuckHuntEnvironment()
 
     all_results = []
@@ -238,6 +248,7 @@ def run_live_evaluation(
     total_shots = len(all_results)
 
     return {
+        "name": eval_name,
         "total_shots": total_shots,
         "total_hits": total_hits,
         "hit_rate": total_hits / total_shots if total_shots > 0 else 0,
@@ -252,20 +263,21 @@ def evaluate_agent(
     model_name: str = "gpt-4o",
     num_episodes: int = 3,
     max_steps: int = 50,
+    name: str | None = None,
 ) -> dict:
     """
     Quick evaluation of an agent.
 
     Usage:
         from experiments.evaluation import evaluate_agent
-        results = evaluate_agent("gpt-4o", num_episodes=3)
+        results = evaluate_agent("gpt-4o", num_episodes=3, name="my-eval")
     """
     weave.init("duck-hunt-vlm-evaluation")
 
     agent = DuckHuntVLMAgent(model_name=model_name)
-    results = run_live_evaluation(agent, num_episodes, max_steps)
+    results = run_live_evaluation(agent, num_episodes, max_steps, name=name)
 
-    print(f"\n=== Results ===")
+    print(f"\n=== Results: {results['name']} ===")
     print(f"Hit rate: {results['hit_rate']:.1%}")
     print(f"Avg reward: {results['avg_reward']:.2f}")
     print(f"Avg horizon: {results['avg_horizon']:.1f}")

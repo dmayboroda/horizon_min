@@ -56,6 +56,12 @@ def main():
         default=0.0,
         help="Model temperature",
     )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Name for the evaluation run",
+    )
 
     args = parser.parse_args()
 
@@ -107,14 +113,16 @@ def main():
         print(f"Avg steps: {results['avg_steps']:.1f}")
 
     elif args.mode == "evaluate":
-        print(f"Running evaluation with {args.episodes} episodes...")
+        eval_name = args.name or f"eval-{args.model}-{args.episodes}ep"
+        print(f"Running evaluation '{eval_name}' with {args.episodes} episodes...")
         results = run_live_evaluation(
             agent,
             args.episodes,
             args.max_steps,
+            name=eval_name,
         )
 
-        print("\n=== Evaluation Results ===")
+        print(f"\n=== Evaluation Results: {results['name']} ===")
         print(f"Total shots: {results['total_shots']}")
         print(f"Total hits: {results['total_hits']}")
         print(f"Hit rate: {results['hit_rate']:.1%}")
