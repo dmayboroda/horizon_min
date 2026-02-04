@@ -70,8 +70,8 @@ def create_evaluation_dataset(
             # Random action to progress game
             import random
             action = {
-                "x": random.randint(0, 800),
-                "y": random.randint(0, 500),
+                "x": random.random(),  # 0.0-1.0 normalized
+                "y": random.random(),  # 0.0-1.0 normalized
                 "horizon": random.randint(0, 10),
             }
             obs = env.step(action)

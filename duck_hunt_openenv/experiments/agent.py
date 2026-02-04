@@ -36,8 +36,8 @@ def base64_to_pil(b64_string: str) -> Image.Image:
 @dataclass
 class ShootPrediction:
     """Result of VLM prediction."""
-    x: int
-    y: int
+    x: float  # Normalized 0.0-1.0
+    y: float  # Normalized 0.0-1.0
     horizon: int
     confidence: str | None = None
     raw_response: dict | None = None
@@ -136,8 +136,8 @@ Analyze the frames and call the shoot tool with your prediction."""
             args = json.loads(tool_call.function.arguments)
 
             return ShootPrediction(
-                x=args.get("x", 400),
-                y=args.get("y", 250),
+                x=args.get("x", 0.5),
+                y=args.get("y", 0.5),
                 horizon=args.get("horizon", 0),
                 confidence=args.get("confidence"),
                 raw_response=response.model_dump(),
@@ -145,8 +145,8 @@ Analyze the frames and call the shoot tool with your prediction."""
         else:
             # Fallback if no tool call (shouldn't happen with tool_choice)
             return ShootPrediction(
-                x=400,
-                y=250,
+                x=0.5,
+                y=0.5,
                 horizon=0,
                 confidence="low",
                 raw_response=response.model_dump(),
