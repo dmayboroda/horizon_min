@@ -45,8 +45,8 @@ SPRITE_MAP = {
 class Renderer:
     """Headless renderer using PIL for frame generation."""
 
-    def __init__(self):
-        self.output_size = FRAME_OUTPUT_SIZE  # (512, 512)
+    def __init__(self, output_size: tuple[int, int] = FRAME_OUTPUT_SIZE):
+        self.output_size = output_size
 
         # Load background image
         bg_path = ASSETS_DIR / "background.jpg"

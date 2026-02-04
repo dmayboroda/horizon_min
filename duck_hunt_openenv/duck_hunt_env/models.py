@@ -8,8 +8,8 @@ from typing import Literal
 class ShootAction:
     """Action to shoot at a target location."""
 
-    x: int  # Target x coordinate (0-800)
-    y: int  # Target y coordinate (0-500)
+    x: float  # Target x coordinate (0.0-1.0 normalized)
+    y: float  # Target y coordinate (0.0-1.0 normalized)
     horizon: int  # Frames to wait before shot (0-30)
     confidence: Literal["high", "medium", "low"] | None = None
 

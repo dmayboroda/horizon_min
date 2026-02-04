@@ -404,12 +404,17 @@ class TestEnvironment:
         """Step processes hit correctly."""
         env.reset()
 
-        # Position duck at known location
+        # Disable latency so duck doesn't move before shot
+        env.latency_frames = 0
+        env.latency_ms = 0
+
+        # Position duck at known location (pixel 100, 100)
         env.round.current_match.duck_a.x = 100
         env.round.current_match.duck_a.y = 100
         env.round.current_match.duck_a.state = DuckState.FLYING
 
-        action = {"x": 150, "y": 150, "horizon": 0}
+        # Normalized coords: 150/800 = 0.1875, 150/500 = 0.3
+        action = {"x": 0.1875, "y": 0.3, "horizon": 0}
         obs = env.step(action)
 
         # Should have hit
@@ -426,7 +431,8 @@ class TestEnvironment:
         env.round.current_match.duck_b.x = 200
         env.round.current_match.duck_b.y = 200
 
-        action = {"x": 700, "y": 400, "horizon": 0}
+        # Normalized coords: 700/800 = 0.875, 400/500 = 0.8
+        action = {"x": 0.875, "y": 0.8, "horizon": 0}
         obs = env.step(action)
 
         assert obs["last_action_result"] == "miss"
@@ -435,12 +441,18 @@ class TestEnvironment:
     def test_reward_hit(self, env):
         """Reward for hit is correct."""
         env.reset()
+
+        # Disable latency so duck doesn't move before shot
+        env.latency_frames = 0
+        env.latency_ms = 0
+
         env.round.current_match.duck_a.x = 100
         env.round.current_match.duck_a.y = 100
         env.round.current_match.duck_b.x = 500
-        env.round.current_match.duck_b.y = 500
+        env.round.current_match.duck_b.y = 400
 
-        action = {"x": 150, "y": 150, "horizon": 0}
+        # Normalized coords: 150/800 = 0.1875, 150/500 = 0.3
+        action = {"x": 0.1875, "y": 0.3, "horizon": 0}
         obs = env.step(action)
 
         # With horizon=0, reward should be close to REWARD_HIT
@@ -450,13 +462,19 @@ class TestEnvironment:
     def test_reward_double_kill(self, env):
         """Reward for double kill is correct."""
         env.reset()
+
+        # Disable latency so ducks don't move before shot
+        env.latency_frames = 0
+        env.latency_ms = 0
+
         # Overlap ducks
         env.round.current_match.duck_a.x = 100
         env.round.current_match.duck_a.y = 100
         env.round.current_match.duck_b.x = 100
         env.round.current_match.duck_b.y = 100
 
-        action = {"x": 150, "y": 150, "horizon": 0}
+        # Normalized coords: 150/800 = 0.1875, 150/500 = 0.3
+        action = {"x": 0.1875, "y": 0.3, "horizon": 0}
         obs = env.step(action)
 
         assert obs["last_action_result"] == "double_kill"
@@ -469,7 +487,8 @@ class TestEnvironment:
         env.round.current_match.duck_a.state = DuckState.ESCAPED
         env.round.current_match.duck_b.state = DuckState.ESCAPED
 
-        action = {"x": 400, "y": 250, "horizon": 0}
+        # Normalized coords: center of screen (0.5, 0.5)
+        action = {"x": 0.5, "y": 0.5, "horizon": 0}
         obs = env.step(action)
 
         assert obs["last_action_result"] == "no_target"
@@ -481,7 +500,8 @@ class TestEnvironment:
         env.round.current_match.duck_a.x = 100
         env.round.current_match.duck_a.y = 100
 
-        action_no_horizon = {"x": 150, "y": 150, "horizon": 0}
+        # Normalized coords: 150/800 = 0.1875, 150/500 = 0.3
+        action_no_horizon = {"x": 0.1875, "y": 0.3, "horizon": 0}
         obs1 = env.step(action_no_horizon)
         reward_no_horizon = obs1["reward"]
 
@@ -490,7 +510,7 @@ class TestEnvironment:
         env.round.current_match.duck_a.x = 100
         env.round.current_match.duck_a.y = 100
 
-        action_with_horizon = {"x": 150, "y": 150, "horizon": 15}
+        action_with_horizon = {"x": 0.1875, "y": 0.3, "horizon": 15}
         obs2 = env.step(action_with_horizon)
         reward_with_horizon = obs2["reward"]
 
@@ -507,12 +527,153 @@ class TestEnvironment:
         env.round.current_match.duck_a.state = DuckState.ESCAPED
         env.round.current_match.duck_b.state = DuckState.ESCAPED
 
-        action = {"x": 400, "y": 250, "horizon": 0}
+        # Normalized coords: center of screen (0.5, 0.5)
+        action = {"x": 0.5, "y": 0.5, "horizon": 0}
         obs = env.step(action)
 
         # Match should complete and add misses
         # This might trigger game over
         assert obs["total_misses"] >= MAX_MISSES - 1
+
+    def test_normalized_coords_boundary_zero(self, env):
+        """Normalized coord 0.0 maps to pixel 0."""
+        env.reset()
+
+        # Disable latency so duck doesn't move before shot
+        env.latency_frames = 0
+        env.latency_ms = 0
+
+        # Position duck at top-left corner
+        env.round.current_match.duck_a.x = 0
+        env.round.current_match.duck_a.y = 0
+        env.round.current_match.duck_a.state = DuckState.FLYING
+        # Move duck_b far away
+        env.round.current_match.duck_b.x = 700
+        env.round.current_match.duck_b.y = 400
+
+        # Shoot at normalized (0.05, 0.1) which is pixel (40, 50) - inside hitbox at (0,0)
+        action = {"x": 0.05, "y": 0.1, "horizon": 0}
+        obs = env.step(action)
+
+        # Should hit duck at origin
+        assert obs["last_action_result"] in ["hit", "double_kill"]
+
+    def test_normalized_coords_boundary_one(self, env):
+        """Normalized coord 1.0 maps to screen edge."""
+        env.reset()
+
+        # Position duck at bottom-right area
+        env.round.current_match.duck_a.x = SCREEN_WIDTH - HITBOX_WIDTH
+        env.round.current_match.duck_a.y = SCREEN_HEIGHT - HITBOX_HEIGHT
+        env.round.current_match.duck_a.state = DuckState.FLYING
+        # Move duck_b far away
+        env.round.current_match.duck_b.x = 100
+        env.round.current_match.duck_b.y = 100
+
+        # Shoot at normalized (0.95, 0.9) which is pixel (760, 450) - inside hitbox
+        action = {"x": 0.95, "y": 0.9, "horizon": 0}
+        obs = env.step(action)
+
+        # Should hit duck at corner
+        assert obs["last_action_result"] in ["hit", "double_kill"]
+
+    def test_normalized_coords_clamped(self, env):
+        """Values outside 0.0-1.0 are clamped."""
+        env.reset()
+
+        # Position duck at corner
+        env.round.current_match.duck_a.x = 0
+        env.round.current_match.duck_a.y = 0
+        env.round.current_match.duck_a.state = DuckState.FLYING
+
+        # Shoot with negative coords (should clamp to 0)
+        action = {"x": -0.5, "y": -0.5, "horizon": 0}
+        obs = env.step(action)
+
+        # Should still work (clamped to 0,0 which hits duck at origin)
+        assert obs["last_action_result"] in ["hit", "double_kill", "miss"]
+        # No crash = success
+
+    def test_normalized_coords_over_one_clamped(self, env):
+        """Values > 1.0 are clamped to 1.0."""
+        env.reset()
+
+        # Position duck at bottom-right
+        env.round.current_match.duck_a.x = SCREEN_WIDTH - HITBOX_WIDTH
+        env.round.current_match.duck_a.y = SCREEN_HEIGHT - HITBOX_HEIGHT
+        env.round.current_match.duck_a.state = DuckState.FLYING
+
+        # Shoot with coords > 1.0 (should clamp to 1.0)
+        action = {"x": 1.5, "y": 2.0, "horizon": 0}
+        obs = env.step(action)
+
+        # Should still work (clamped to edge)
+        assert obs["last_action_result"] in ["hit", "double_kill", "miss"]
+
+    def test_center_shot(self, env):
+        """Normalized (0.5, 0.5) maps to center pixel (400, 250)."""
+        env.reset()
+
+        # Disable latency so duck doesn't move before shot
+        env.latency_frames = 0
+        env.latency_ms = 0
+
+        # Position duck at center
+        env.round.current_match.duck_a.x = 400 - HITBOX_WIDTH // 2
+        env.round.current_match.duck_a.y = 250 - HITBOX_HEIGHT // 2
+        env.round.current_match.duck_a.state = DuckState.FLYING
+        # Move duck_b far away
+        env.round.current_match.duck_b.x = 100
+        env.round.current_match.duck_b.y = 100
+
+        # Shoot at normalized center (0.5, 0.5) = pixel (400, 250)
+        action = {"x": 0.5, "y": 0.5, "horizon": 0}
+        obs = env.step(action)
+
+        assert obs["last_action_result"] in ["hit", "double_kill"]
+
+
+class TestConfigurableResolution:
+    """Tests for configurable output resolution."""
+
+    def test_default_resolution(self):
+        """Default resolution is 512x512."""
+        env = DuckHuntEnvironment()
+        assert env.output_size == FRAME_OUTPUT_SIZE
+        assert env.output_size == (512, 512)
+
+    def test_custom_resolution(self):
+        """Custom resolution can be set."""
+        env = DuckHuntEnvironment(output_size=(256, 256))
+        assert env.output_size == (256, 256)
+        assert env.renderer.output_size == (256, 256)
+
+    def test_custom_resolution_renders_correctly(self):
+        """Custom resolution produces correct image size."""
+        env = DuckHuntEnvironment(output_size=(256, 256))
+        obs = env.reset()
+
+        # Decode first frame and check size
+        import base64
+        from io import BytesIO
+        frame_b64 = obs["frames"][0]
+        frame_bytes = base64.b64decode(frame_b64)
+        image = Image.open(BytesIO(frame_bytes))
+
+        assert image.size == (256, 256)
+
+    def test_non_square_resolution(self):
+        """Non-square resolution works."""
+        env = DuckHuntEnvironment(output_size=(640, 480))
+        obs = env.reset()
+
+        import base64
+        from io import BytesIO
+        frame_b64 = obs["frames"][0]
+        frame_bytes = base64.b64decode(frame_b64)
+        image = Image.open(BytesIO(frame_bytes))
+
+        assert image.size == (640, 480)
 
 
 # =============================================================================

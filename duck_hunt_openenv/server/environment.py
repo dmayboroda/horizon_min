@@ -8,6 +8,7 @@ from config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
     FRAMES_PER_OBSERVATION,
+    FRAME_OUTPUT_SIZE,
     LATENCY_OPTIONS_MS,
     FPS,
     MAX_HORIZON,
@@ -26,15 +27,16 @@ from config import (
 class DuckHuntEnvironment:
     """OpenEnv-compatible Duck Hunt environment."""
 
-    def __init__(self):
+    def __init__(self, output_size: tuple[int, int] = FRAME_OUTPUT_SIZE):
         # Game state
         self.round: Round | None = None
         self.round_number: int = 1
         self.total_misses: int = 0
         self.frame_counter: int = 0
 
-        # Renderer
-        self.renderer = Renderer()
+        # Renderer with configurable output size
+        self.output_size = output_size
+        self.renderer = Renderer(output_size=output_size)
 
         # Frame buffer (last N frames as base64)
         self.frame_buffer: list[str] = []
@@ -104,14 +106,19 @@ class DuckHuntEnvironment:
 
     def step(self, action: dict) -> dict:
         """Execute action and return observation."""
-        x = action.get("x", 0)
-        y = action.get("y", 0)
+        # Get normalized coords (0.0-1.0)
+        x_norm = action.get("x", 0.0)
+        y_norm = action.get("y", 0.0)
         horizon = action.get("horizon", 0)
 
-        # 1. VALIDATE ACTION
-        x = max(0, min(x, SCREEN_WIDTH))
-        y = max(0, min(y, SCREEN_HEIGHT))
+        # 1. VALIDATE ACTION - clamp normalized coords to valid range
+        x_norm = max(0.0, min(1.0, float(x_norm)))
+        y_norm = max(0.0, min(1.0, float(y_norm)))
         horizon = max(0, min(horizon, MAX_HORIZON))
+
+        # Convert to pixel coordinates
+        x = int(x_norm * SCREEN_WIDTH)   # 0.0-1.0 -> 0-800
+        y = int(y_norm * SCREEN_HEIGHT)  # 0.0-1.0 -> 0-500
 
         match = self.round.current_match
 
