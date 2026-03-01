@@ -54,6 +54,7 @@ class ModelConfig:
     attn_implementation: str = "sdpa"
     trust_remote_code: bool = True
     device_map: str = "auto"
+    quantization: str | None = None  # "4bit" or "8bit" or None
 
 
 # ---------------------------------------------------------------------------

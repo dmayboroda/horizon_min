@@ -48,6 +48,24 @@ def load_model_and_processor(
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
+    # Quantization config (QLoRA)
+    quantization_config = None
+    if config.quantization in ("4bit", "4"):
+        from transformers import BitsAndBytesConfig
+
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        logger.info("Loading model in 4-bit (QLoRA mode)")
+    elif config.quantization in ("8bit", "8"):
+        from transformers import BitsAndBytesConfig
+
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        logger.info("Loading model in 8-bit")
+
     logger.info("Loading model from %s (dtype=%s) …", model_name, config.torch_dtype)
     model = AutoModelForImageTextToText.from_pretrained(
         model_name,
@@ -55,6 +73,7 @@ def load_model_and_processor(
         device_map=config.device_map,
         attn_implementation=config.attn_implementation,
         trust_remote_code=config.trust_remote_code,
+        quantization_config=quantization_config,
     )
 
     # ---- Diagnostics ----

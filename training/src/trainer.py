@@ -102,6 +102,11 @@ class DuckHuntGRPOTrainer:
 
         self.device = next(model.parameters()).device
 
+        # Enable gradient checkpointing to save memory
+        if train.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled")
+
         # Checkpoint tracking
         self.global_step = 0
         self.best_eval_hit_rate = -1.0
