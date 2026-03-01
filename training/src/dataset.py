@@ -19,7 +19,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from datasets import Dataset
+import io
+
+from datasets import Dataset, Features, Sequence, Value
+from datasets import Image as DatasetImage
 from PIL import Image
 
 from .config import EnvironmentConfig, RewardConfig
@@ -113,6 +116,63 @@ def _rng_restore(state_json: str) -> None:
     random.setstate(tuple(raw))
 
 
+def _pil_to_bytes(img: Image.Image) -> bytes:
+    """Convert a PIL Image to PNG bytes for Arrow storage."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _strip_pil_from_messages(messages: list[dict]) -> list[dict]:
+    """Remove PIL Image objects from message dicts for JSON serialisation.
+
+    Replaces ``{"type": "image", "image": <PIL>}`` with ``{"type": "image"}``.
+    """
+    out = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            clean_content = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image":
+                    clean_content.append({"type": "image"})
+                else:
+                    clean_content.append(item)
+            out.append({**msg, "content": clean_content})
+        else:
+            out.append(msg)
+    return out
+
+
+def reconstruct_prompt(example: dict) -> dict:
+    """HF Dataset map function: inject PIL images back into prompt messages.
+
+    The dataset stores prompts as JSON strings with ``{"type": "image"}``
+    placeholders and images in a separate column.  This function
+    reassembles the full multimodal messages that TRL / the processor
+    can tokenise.
+    """
+    messages = json.loads(example["prompt"])
+    images = example.get("images", [])
+
+    img_idx = 0
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image":
+                    if img_idx < len(images):
+                        img = images[img_idx]
+                        # HF Dataset Image feature returns PIL Images
+                        if not isinstance(img, Image.Image):
+                            img = Image.open(io.BytesIO(img))
+                        item["image"] = img
+                        img_idx += 1
+
+    example["prompt"] = messages
+    return example
+
+
 # ===================================================================
 #  Simulate a shot from a snapshot  (used by the reward function)
 # ===================================================================
@@ -199,11 +259,11 @@ class DuckHuntPromptGenerator:
         Returns
         -------
         datasets.Dataset
-            Columns: ``prompt`` (list[dict]), ``images`` (list[Image]),
-            ``snapshot`` (str).
+            Columns: ``prompt`` (str, JSON-encoded messages),
+            ``images`` (list[Image]), ``snapshot`` (str).
         """
-        prompts: list[list[dict]] = []
-        all_images: list[list[Image.Image]] = []
+        prompts: list[str] = []
+        all_images: list[list[bytes]] = []
         snapshots: list[str] = []
 
         obs = self.env.reset()
@@ -227,15 +287,21 @@ class DuckHuntPromptGenerator:
                 frames = self.env.get_frames()
                 state = self.env.get_state()
 
-            # Build prompt (messages + tools returned separately)
+            # Build prompt with image placeholders (no PIL objects)
             messages, _tools = build_prompt(frames, state)
+
+            # Strip PIL objects from messages for serialisation —
+            # replace {"type": "image", "image": <PIL>} with {"type": "image"}
+            serialisable_messages = _strip_pil_from_messages(messages)
 
             # Snapshot for deterministic reward
             snap = capture_snapshot(self.env)
 
-            # Store — images separately for HF Dataset Image feature
-            prompts.append(messages)
-            all_images.append(frames)
+            # Convert PIL frames to PNG bytes for Arrow storage
+            frame_bytes = [_pil_to_bytes(f) for f in frames]
+
+            prompts.append(json.dumps(serialisable_messages))
+            all_images.append(frame_bytes)
             snapshots.append(json.dumps(snap))
 
             # Advance environment to create diverse states
@@ -252,7 +318,12 @@ class DuckHuntPromptGenerator:
                 "prompt": prompts,
                 "images": all_images,
                 "snapshot": snapshots,
-            }
+            },
+            features=Features({
+                "prompt": Value("string"),
+                "images": Sequence(DatasetImage()),
+                "snapshot": Value("string"),
+            }),
         )
 
 

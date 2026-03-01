@@ -38,6 +38,7 @@ from src.dataset import (
     DuckHuntPromptGenerator,
     make_format_reward_function,
     make_reward_function,
+    reconstruct_prompt,
 )
 from src.model import load_model_and_processor, apply_lora
 
@@ -94,6 +95,13 @@ def train_trl(cfg: FullConfig, num_samples: int) -> None:
     generator = DuckHuntPromptGenerator(cfg.environment)
     dataset = generator.generate(num_samples)
     logger.info("Dataset ready: %d rows", len(dataset))
+
+    # Reconstruct multimodal prompts: inject PIL images back into messages
+    dataset = dataset.map(
+        reconstruct_prompt,
+        remove_columns=["images"],
+        desc="Rebuilding multimodal prompts",
+    )
 
     # 2. Load model + processor
     model, processor = load_model_and_processor(cfg.model)
