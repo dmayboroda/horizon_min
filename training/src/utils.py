@@ -197,7 +197,7 @@ def build_prompt(
     user_content.append({"type": "text", "text": state_text})
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
         {"role": "user", "content": user_content},
     ]
 
