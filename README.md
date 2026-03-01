@@ -2,18 +2,31 @@
 
 ![Duck Hunt](duckhunt.webp)
 
-A headless Duck Hunt game environment designed for training and evaluating Vision Language Models (VLMs). This project provides an API-first implementation of the classic Nintendo Duck Hunt game as a research platform for AI agents.
+A headless Duck Hunt game environment designed for training and evaluating Vision Language Models (VLMs). This project provides an API-first implementation of the classic Nintendo Duck Hunt game as a research platform for AI agents, paired with a full GRPO training pipeline for fine-tuning multimodal models to play the game.
 
 ## Project Structure
 
 ```
 horizon_min/
-├── duck_hunt_openenv/          # Main OpenEnv implementation
+├── duck_hunt_openenv/          # OpenEnv game environment
 │   ├── duck_hunt_env/          # Python client package
-│   ├── server/                 # FastAPI backend
+│   ├── server/                 # FastAPI backend + game engine
 │   ├── experiments/            # VLM agent experiments (Weave)
 │   ├── tests/                  # Unit and integration tests
 │   └── assets/                 # Game sprites and backgrounds
+├── training/                   # GRPO training pipeline
+│   ├── train.py                # Main training entry point
+│   ├── evaluate.py             # Evaluation with baselines
+│   ├── run_training.sh         # Launch script
+│   ├── configs/                # YAML training configs
+│   └── src/                    # Training modules
+│       ├── config.py           # Configuration dataclasses
+│       ├── model.py            # Model loading + LoRA
+│       ├── environment.py      # Direct env wrapper (no HTTP)
+│       ├── utils.py            # Prompts, tool schema, parsing
+│       ├── reward.py           # Reward computation
+│       ├── dataset.py          # Dataset generation + snapshot system
+│       └── trainer.py          # Custom GRPO trainer
 ├── duckhunt/                   # Original pygame-based game (reference)
 └── GAME_PARAMETERS.md          # Game mechanics documentation
 ```
@@ -22,13 +35,15 @@ horizon_min/
 
 - **Headless Design**: No display required, pure Python API
 - **VLM-Ready**: Base64 frame encoding, OpenAI function calling support
-- **Experiment Tracking**: W&B Weave integration for reproducible research
-- **Configurable**: All game parameters in a single config file
-- **Well-Tested**: Unit and integration test coverage
+- **GRPO Training**: Full pipeline for fine-tuning VLMs with reinforcement learning
+- **OpenAI SDK Compatible**: Trained models serve via vLLM/TGI with standard `tools`/`tool_choice`
+- **Latency-Aware**: Simulates real-world inference latency (100-600ms) during training
+- **Experiment Tracking**: W&B integration for training metrics and Weave for experiments
+- **Configurable**: Layered YAML configs with CLI overrides
 
 ## Quick Start
 
-### Installation with uv
+### Environment Setup
 
 ```bash
 # Install uv if you haven't already
@@ -39,14 +54,7 @@ cd horizon_min
 uv sync
 ```
 
-### Installation with pip
-
-```bash
-cd horizon_min
-pip install -e .
-```
-
-## Running the Server
+### Running the Server
 
 ```bash
 # With uv
@@ -59,27 +67,76 @@ uvicorn app:app --reload --port 8000
 
 API docs available at: http://localhost:8000/docs
 
-## Running Tests
-
-### Unit Tests
+### Training a Model
 
 ```bash
-# With uv
-uv run pytest duck_hunt_openenv/tests/test_game.py -v
+cd training
 
-# Or directly
-pytest duck_hunt_openenv/tests/test_game.py -v
+# Run with defaults (Ministral-3-8B, TRL GRPOTrainer, W&B logging)
+./run_training.sh
+
+# Custom GRPO loop
+./run_training.sh --custom
+
+# Without W&B
+./run_training.sh --no-wandb
 ```
 
-### Integration Tests (Random Agent)
+See [training/README.md](training/README.md) for full training documentation.
+
+### Evaluating a Checkpoint
 
 ```bash
-# Run 100 episodes
-uv run python duck_hunt_openenv/tests/test_random_agent.py --episodes 100
+cd training
 
-# Run single detailed episode
-uv run python duck_hunt_openenv/tests/test_random_agent.py --detailed
+python evaluate.py --config configs/ministral_config.yaml \
+    --checkpoint outputs/ministral_duckhunt_grpo/best_checkpoint \
+    --baselines
 ```
+
+## Training Pipeline
+
+The training pipeline uses **Group Relative Policy Optimization (GRPO)** to fine-tune [Ministral-3-8B-Instruct-2512-BF16](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) (8.4B LLM + 0.4B Pixtral vision encoder).
+
+```
+Game Frames (512x512) -> Pixtral Vision Encoder -> Ministral LLM -> shoot(x, y, horizon)
+                                                                          |
+                                                      Environment simulates shot -> reward
+                                                                          |
+                                                                     GRPO update
+```
+
+The model observes consecutive game frames, estimates duck velocity, and predicts where ducks will be after `processing_latency + horizon` frames. It outputs Mistral native tool calls, making the trained adapter directly servable via OpenAI-compatible APIs.
+
+**Key design choices:**
+- **LoRA fine-tuning** (rank 16, ~0.2% trainable params) on attention projections
+- **Dual reward**: accuracy (environment simulation) + format (valid tool call structure)
+- **Deterministic replay**: Snapshots capture duck state + RNG for reproducible reward computation
+- **Latency curriculum**: Training across 6 latency buckets (100-600ms) for robust generalization
+
+## Game Mechanics
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Screen Size | 800 x 500 | Game viewport |
+| Frame Output | 512 x 512 | Resized for model input |
+| FPS | 30 | Frames per second |
+| Match Duration | 30s | Time limit per match |
+| Ducks per Match | 2 | Simultaneous ducks |
+| Bullets per Match | 3 | Shots available |
+| Max Misses | 4 | Game over threshold |
+| Coordinates | 0.0-1.0 | Normalised (x: left-right, y: top-bottom) |
+
+### Rewards
+
+| Event | Reward |
+|-------|--------|
+| Hit | +1.0 |
+| Double Kill | +2.5 |
+| Miss | -0.3 |
+| No Target | -0.5 |
+| Invalid Output | -1.0 |
+| Horizon Penalty | -0.1 x (horizon / 30) on hits |
 
 ## Client Usage
 
@@ -104,8 +161,6 @@ env.close()
 
 ## VLM Agent Experiments
 
-### Setup
-
 ```bash
 # Install with experiment dependencies
 uv sync --extra experiments
@@ -113,37 +168,13 @@ uv sync --extra experiments
 # Configure API keys
 export OPENAI_API_KEY="your-key"
 wandb login
-```
 
-### Run Experiments
-
-```bash
 # Single episode with GPT-4o
 uv run python -m duck_hunt_openenv.experiments.run --mode single --model gpt-4o
 
 # Batch evaluation
 uv run python -m duck_hunt_openenv.experiments.run --mode batch --episodes 10 --model gpt-4o-mini
 ```
-
-## Game Mechanics
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Screen Size | 800 × 500 | Game viewport |
-| FPS | 30 | Frames per second |
-| Match Duration | 30s | Time limit per match |
-| Ducks per Match | 2 | Simultaneous ducks |
-| Bullets per Match | 3 | Shots available |
-| Max Misses | 4 | Game over threshold |
-
-### Rewards
-
-| Event | Reward |
-|-------|--------|
-| Hit | +1.0 |
-| Double Kill | +2.5 |
-| Miss | -0.3 |
-| No Target | -0.5 |
 
 ## API Endpoints
 
@@ -162,6 +193,16 @@ uv run python -m duck_hunt_openenv.experiments.run --mode batch --episodes 10 --
   "horizon": 5,
   "confidence": "high"
 }
+```
+
+## Running Tests
+
+```bash
+# Unit tests
+uv run pytest duck_hunt_openenv/tests/test_game.py -v
+
+# Integration tests (random agent)
+uv run python duck_hunt_openenv/tests/test_random_agent.py --episodes 100
 ```
 
 ## Development

@@ -17,10 +17,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import math
-import os
 import shutil
-from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -32,7 +29,7 @@ from .config import FullConfig
 from .dataset import capture_snapshot, simulate_shot
 from .environment import DuckHuntEnvWrapper
 from .reward import compute_reward
-from .utils import TOOLS, Action, build_prompt, parse_tool_call
+from .utils import build_prompt, parse_tool_call
 
 logger = logging.getLogger(__name__)
 
