@@ -1,11 +1,9 @@
 # Prodigy optimizer — learning rate free
 optimizer:
   name: "prodigy"
+  lr: 1.0  # Prodigy adjusts internally
   prodigy_d_coef: 1.0
   prodigy_growth_rate: .inf
-
-training:
-  learning_rate: 1.0  # Prodigy adjusts internally
 
 logging:
   wandb_run_name: "ministral-prodigy"

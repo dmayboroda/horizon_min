@@ -83,8 +83,19 @@ def _compute_distance_reward(result: dict, action: Action) -> float:
     """Compute a distance-based shaping reward for near misses.
 
     Returns a value in [0, 1] — closer to a duck is better.
-    Uses the minimum distance to either duck (normalised).
+
+    Supports two formats:
+    - ``miss_distance`` (float): pixel distance to nearest duck
+    - ``duck_a_pos`` / ``duck_b_pos`` (tuple): normalised (x, y) positions
     """
+    # Format 1: direct miss_distance (pixel space)
+    miss_distance = result.get("miss_distance")
+    if miss_distance is not None:
+        # Assume screen diagonal ~943 px (800x500) as max distance
+        max_dist = math.sqrt(800**2 + 500**2)
+        return max(0.0, 1.0 - float(miss_distance) / max_dist)
+
+    # Format 2: duck positions (normalised space)
     min_dist = float("inf")
 
     for key in ["duck_a_pos", "duck_b_pos"]:

@@ -126,17 +126,26 @@ class DuckHuntGRPOTrainer:
 
         # Collect all trainable params (LoRA + forward_mod extras)
         trainable_params = [p for p in model.parameters() if p.requires_grad]
+        # Also collect named params for optimizers that need ndim split (Muon)
+        named_trainable = [
+            (n, p) for n, p in model.named_parameters() if p.requires_grad
+        ]
         extra_params = getattr(model, "_forward_mod_params", [])
         if extra_params:
             # Ensure extra params require grad
-            for p in extra_params:
+            for i, p in enumerate(extra_params):
                 p.requires_grad_(True)
             trainable_params.extend(extra_params)
+            # Add extras to named list too
+            named_trainable.extend(
+                (f"_forward_mod_extra_{i}", p) for i, p in enumerate(extra_params)
+            )
             logger.info("Added %d extra forward_mod params to optimizer", len(extra_params))
 
-        # Optimiser (uses registry)
+        # Optimiser (uses registry — passes named_params for Muon ndim split)
         self.optimizer = create_optimizer(
             trainable_params, config.optimizer, train,
+            named_params=named_trainable,
         )
 
         total_steps = train.max_steps if train.max_steps > 0 else 1000
@@ -224,6 +233,7 @@ class DuckHuntGRPOTrainer:
             "env/frames_per_observation": cfg.environment.frames_per_observation,
             # Optimizer
             "optimizer/name": cfg.optimizer.name,
+            "optimizer/lr": cfg.optimizer.lr if cfg.optimizer.lr is not None else cfg.training.learning_rate,
             # Forward mods
             "forward_mod/enabled": cfg.forward_mod.enabled,
             "forward_mod/mode": cfg.forward_mod.mode,

@@ -22,7 +22,7 @@ class EnvironmentConfig:
     # Screen / rendering
     screen_width: int = 800
     screen_height: int = 500
-    frame_output_size: tuple[int, int] = (512, 512)
+    frame_output_size: tuple[int, int] = (256, 256)
 
     # Observation
     frames_per_observation: int = 4
@@ -78,6 +78,11 @@ class LoRAConfig:
     )
     task_type: str = "CAUSAL_LM"
     bias: str = "none"
+
+    @property
+    def alpha(self) -> int:
+        """Alias for lora_alpha."""
+        return self.lora_alpha
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +216,7 @@ class OptimizerConfig:
     """Optimizer selection and parameters."""
 
     name: str = "adamw"  # adamw | adamw_8bit | muon | soap | shampoo | prodigy
+    lr: float | None = None  # Per-optimizer LR override (falls back to training.learning_rate)
     # AdamW / AdamW-8bit
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
@@ -255,6 +261,20 @@ class ForwardModConfig:
     log_std_init: float = -1.0
     log_std_min: float = -5.0
     log_std_max: float = 2.0
+
+    @property
+    def names(self) -> list[str]:
+        """Return list of enabled forward mod names."""
+        if not self.enabled:
+            return []
+        result: list[str] = []
+        if self.temporal_position:
+            result.append("temporal_position")
+        if self.cross_frame_attention:
+            result.append("cross_frame_attention")
+        if self.spatial_decoder:
+            result.append("spatial_decoder")
+        return result
 
 
 # ---------------------------------------------------------------------------

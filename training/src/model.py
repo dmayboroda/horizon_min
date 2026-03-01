@@ -14,6 +14,21 @@ from .utils import TOOLS, parse_tool_call
 
 logger = logging.getLogger(__name__)
 
+
+def _register_ministral3_if_needed():
+    """Register ministral3 text model type if not in CONFIG_MAPPING."""
+    try:
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+        if "ministral3" not in CONFIG_MAPPING:
+            from transformers import MistralConfig
+
+            CONFIG_MAPPING.register("ministral3", MistralConfig, exist_ok=True)
+            logger.info("Registered 'ministral3' → MistralConfig")
+    except Exception as e:
+        logger.debug("ministral3 registration: %s", e)
+
+
 # Dtype string → torch dtype
 _DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
@@ -34,6 +49,8 @@ def load_model_and_processor(
     ``Mistral3ForConditionalGeneration`` for the mistral3 architecture
     (8.4 B LLM + 0.4 B Pixtral vision encoder).
     """
+    _register_ministral3_if_needed()
+
     model_name = config.model_name
     dtype = _DTYPE_MAP.get(config.torch_dtype, torch.bfloat16)
 

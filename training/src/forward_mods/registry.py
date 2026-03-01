@@ -73,3 +73,7 @@ def apply_forward_mods(
         logger.info("Applied forward mod: spatial_decoder")
 
     return model, applied
+
+
+# Alias for backward compatibility
+get_forward_mods = apply_forward_mods

@@ -160,7 +160,7 @@ class ActionHead(nn.Module):
 
 
 @register_mod("spatial_decoder")
-class SpatialDecoderMod(ForwardMod):
+class SpatialDecoder(ForwardMod):
     """Replaces last N LM layers + LM head with spatial decoder + action head."""
 
     def __init__(self, config: ForwardModConfig) -> None:

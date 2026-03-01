@@ -1,14 +1,16 @@
 """Cross-frame attention for multi-frame temporal reasoning.
 
-Injects lightweight cross-attention layers at specified positions in
-the transformer stack.  Each cross-frame attention layer attends
-across vision tokens from different frames, enabling the model to
-compute inter-frame motion features.
+Hooks into the vision tower output (dim=1024) to perform cross-frame
+attention BEFORE the patch merger and projector.  This lets the model
+compare patches at the same spatial position across frames — crucial
+for detecting duck motion between frames.
 
-Architecture reference:
-    - LM has 34 layers (0..33), hidden_dim=4096
-    - Default injection points: layers 0, 1, 2, 3 (early layers)
-    - Each 512x512 frame → 324 vision tokens
+Architecture (verified against Ministral 3 8B):
+    - Vision encoder: 24-layer PixTral ViT, output dim = 1024
+    - 256×256 frame → 18×18 = 324 raw patches at dim 1024
+    - After 2×2 merge: 9×9 = 81 patches at dim 4096
+    - We hook BEFORE merge at dim 1024
+    - patches_per_frame is computed dynamically from the actual output
 """
 
 from __future__ import annotations
@@ -24,18 +26,24 @@ from .registry import register_mod
 
 logger = logging.getLogger(__name__)
 
-_TOKENS_PER_FRAME = 324
+# Vision encoder output dim (PixTral ViT)
+_VISION_DIM = 1024
 
 
 class CrossFrameAttentionLayer(nn.Module):
-    """Single cross-frame attention block.
+    """Single cross-frame attention block at vision encoder dim.
 
     Pools each frame's vision tokens into a summary, then uses
     cross-attention to let each frame attend to all frame summaries.
-    This is lighter than full cross-frame token-level attention.
+    Operates at dim=1024 (before patch merger).
     """
 
-    def __init__(self, hidden_dim: int, num_frames: int, num_heads: int = 8) -> None:
+    def __init__(
+        self,
+        hidden_dim: int = _VISION_DIM,
+        num_frames: int = 4,
+        num_heads: int = 8,
+    ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_frames = num_frames
@@ -58,136 +66,130 @@ class CrossFrameAttentionLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        vision_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply cross-frame attention.
 
         Parameters
         ----------
-        hidden_states : (B, T, D)
-            Full sequence hidden states.
-        vision_token_mask : (B, T), optional
-            Boolean mask where True = vision token.
+        hidden_states : (B, total_patches, D)
+            Vision tokens from all frames concatenated.
 
         Returns
         -------
-        (B, T, D) with cross-frame attention added to vision tokens.
+        (B, total_patches, D) with cross-frame attention added.
         """
         B, T, D = hidden_states.shape
 
-        if vision_token_mask is None:
-            # Assume first (num_frames * tokens_per_frame) tokens are vision
-            n_vision = self.num_frames * _TOKENS_PER_FRAME
-            if T < n_vision:
-                return hidden_states
-            vision_tokens = hidden_states[:, :n_vision, :]  # (B, V, D)
-        else:
-            # Extract vision tokens — for now just use first n_vision
-            n_vision = self.num_frames * _TOKENS_PER_FRAME
-            vision_tokens = hidden_states[:, :n_vision, :]
-
-        # Reshape into frames: (B, num_frames, tokens_per_frame, D)
-        actual_frames = n_vision // _TOKENS_PER_FRAME
-        if actual_frames == 0:
+        # Dynamically compute patches per frame
+        patches_per_frame = T // self.num_frames
+        if patches_per_frame == 0 or T % self.num_frames != 0:
             return hidden_states
 
-        frames = vision_tokens[:, : actual_frames * _TOKENS_PER_FRAME, :].reshape(
-            B, actual_frames, _TOKENS_PER_FRAME, D
-        )
+        actual_frames = self.num_frames
+        n_vision = actual_frames * patches_per_frame
+
+        # Reshape into frames: (B, num_frames, patches_per_frame, D)
+        vision_tokens = hidden_states[:, :n_vision, :]
+        frames = vision_tokens.reshape(B, actual_frames, patches_per_frame, D)
 
         # Pool each frame: mean → project → (B, num_frames, D)
         frame_summaries = frames.mean(dim=2)
         frame_summaries = self.frame_proj(frame_summaries)
 
-        # Cross-attend: each token queries all frame summaries
+        # Cross-attend: each vision token queries all frame summaries
         # Q: vision_tokens (B, V, D), K/V: frame_summaries (B, F, D)
-        normed = self.norm(vision_tokens[:, : actual_frames * _TOKENS_PER_FRAME, :])
+        normed = self.norm(vision_tokens)
         cross_out, _ = self.cross_attn(
             normed, frame_summaries, frame_summaries
         )
 
         # Gated residual — gate starts at 0
         result = hidden_states.clone()
-        n = actual_frames * _TOKENS_PER_FRAME
-        result[:, :n, :] = result[:, :n, :] + self.gate * cross_out
+        result[:, :n_vision, :] = result[:, :n_vision, :] + self.gate * cross_out
 
         return result
 
 
 @register_mod("cross_frame_attention")
-class CrossFrameAttentionMod(ForwardMod):
-    """Injects CrossFrameAttentionLayers at specified LM layers."""
+class CrossFrameMotionAttention(ForwardMod):
+    """Hooks cross-frame attention into the vision tower output.
+
+    Unlike the previous version that wrapped LM layers, this hooks
+    directly onto the vision tower output at dim=1024, before the
+    patch merger and projector.
+    """
 
     def __init__(self, config: ForwardModConfig) -> None:
         super().__init__()
         self.config = config
-        self.cross_layers: nn.ModuleList = nn.ModuleList()
+        self.cross_layer = CrossFrameAttentionLayer(
+            hidden_dim=_VISION_DIM,
+            num_frames=config.num_frames,
+            num_heads=8,
+        )
+        self._hook_handle = None
 
     def apply(self, model: nn.Module) -> nn.Module:
-        """Wrap specified LM layers with cross-frame attention."""
-        # Find the transformer layers
+        """Register a forward hook on the vision tower."""
         base = getattr(model, "base_model", model)
         base = getattr(base, "model", base)
 
-        lm = None
-        for attr in ["language_model", "model"]:
+        # Find the vision tower
+        vision_tower = None
+        for attr in ["vision_tower", "vision_model", "visual"]:
             candidate = getattr(base, attr, None)
             if candidate is not None:
-                lm = candidate
+                vision_tower = candidate
                 break
 
-        if lm is None:
-            logger.warning("Could not find language model — cross_frame_attention not applied.")
-            return model
-
-        layers = None
-        if hasattr(lm, "layers"):
-            layers = lm.layers
-        elif hasattr(lm, "model") and hasattr(lm.model, "layers"):
-            layers = lm.model.layers
-
-        if layers is None:
-            logger.warning("Could not find transformer layers — cross_frame_attention not applied.")
-            return model
-
-        device = next(model.parameters()).device
-        target_layers = self.config.cross_frame_layers
-
-        for layer_idx in target_layers:
-            if layer_idx >= len(layers):
-                logger.warning("Layer %d out of range (model has %d layers)", layer_idx, len(layers))
-                continue
-
-            cross_layer = CrossFrameAttentionLayer(
-                hidden_dim=4096,
-                num_frames=self.config.num_frames,
-            ).to(device)
-            self.cross_layers.append(cross_layer)
-
-            # Wrap the original layer's forward
-            original_layer = layers[layer_idx]
-            original_forward = original_layer.forward
-            cross_ref = cross_layer  # closure capture
-
-            def _make_wrapped_forward(orig_fwd, cross_attn_layer):
-                def wrapped_forward(*args, **kwargs):
-                    output = orig_fwd(*args, **kwargs)
-                    # output is typically a tuple (hidden_states, ...)
-                    if isinstance(output, tuple):
-                        hidden_states = output[0]
-                        hidden_states = cross_attn_layer(hidden_states)
-                        return (hidden_states,) + output[1:]
-                    else:
-                        return cross_attn_layer(output)
-                return wrapped_forward
-
-            layers[layer_idx].forward = _make_wrapped_forward(
-                original_forward, cross_layer
+        if vision_tower is None:
+            logger.warning(
+                "Could not find vision tower — "
+                "cross_frame_attention not applied."
             )
-            logger.info("Injected cross-frame attention at layer %d", layer_idx)
+            return model
+
+        # Move to same device/dtype
+        device = next(vision_tower.parameters()).device
+        dtype = next(vision_tower.parameters()).dtype
+        self.cross_layer = self.cross_layer.to(device=device, dtype=dtype)
+
+        def _cross_frame_hook(module, input, output):
+            return self._apply_cross_frame(output)
+
+        self._hook_handle = vision_tower.register_forward_hook(
+            _cross_frame_hook
+        )
+        logger.info(
+            "Registered cross-frame attention hook on %s (dim=%d)",
+            vision_tower.__class__.__name__,
+            _VISION_DIM,
+        )
 
         return model
 
+    def _apply_cross_frame(self, vit_output):
+        """Apply cross-frame attention to vision tower output."""
+        # Extract hidden states (same logic as temporal_position)
+        if isinstance(vit_output, torch.Tensor):
+            hidden = vit_output
+            modified = self.cross_layer(hidden)
+            return modified
+        elif isinstance(vit_output, (tuple, list)):
+            hidden = vit_output[0]
+            modified = self.cross_layer(hidden)
+            if isinstance(vit_output, tuple):
+                return (modified,) + vit_output[1:]
+            else:
+                return [modified] + list(vit_output[1:])
+        elif hasattr(vit_output, "last_hidden_state"):
+            hidden = vit_output.last_hidden_state
+            modified = self.cross_layer(hidden)
+            vit_output.last_hidden_state = modified
+            return vit_output
+        else:
+            return vit_output
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Not used directly — logic is in the wrapped layer forwards."""
+        """Not used directly — logic is in the hook."""
         return x

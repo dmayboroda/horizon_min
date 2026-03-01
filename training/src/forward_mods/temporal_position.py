@@ -2,12 +2,15 @@
 
 Adds a learned per-frame embedding to vision tokens so the model can
 distinguish frame ordering (oldest → newest).  The embedding is added
-*after* the vision projector, before the tokens enter the LM layers.
+*before* the patch merger and projector, at the vision encoder output
+(dim=1024).
 
-Architecture (from verify_model.py):
-    - Each 512x512 frame → 324 vision tokens (after spatial merge 2x2)
-    - Vision hidden dim = 4096 (after projector)
-    - 4 frames → 1296 total vision tokens
+Architecture (verified against Ministral 3 8B):
+    - Vision encoder: 24-layer PixTral ViT, output dim = 1024
+    - Patch size 14, spatial_merge_size = 2 (2×2 merge: 1024 → 4096)
+    - 256×256 frame → 18×18 = 324 raw patches at dim 1024
+    - After merge: 9×9 = 81 patches at dim 4096
+    - We hook BEFORE merge at dim 1024, 324 patches/frame
 """
 
 from __future__ import annotations
@@ -23,23 +26,27 @@ from .registry import register_mod
 
 logger = logging.getLogger(__name__)
 
-# Tokens per frame after Pixtral spatial merge (2x2 on 512x512, patch_size=14)
-# = (512/14)^2 / (2*2) = 36.57^2 / 4 ≈ 1369/4 ≈ 324 (ceil)
-_TOKENS_PER_FRAME = 324
+# Vision encoder output dim (PixTral ViT)
+_VISION_DIM = 1024
 
 
 @register_mod("temporal_position")
 class TemporalPositionEncoding(ForwardMod):
-    """Adds learned temporal embeddings to per-frame vision tokens."""
+    """Adds learned temporal embeddings to per-frame vision tokens.
+
+    Hooks into the vision tower output (dim=1024) BEFORE the patch
+    merger and projector.  This tags each frame's patches with a
+    temporal index before spatial positions get scrambled by the 2×2
+    merge.
+    """
 
     def __init__(self, config: ForwardModConfig) -> None:
         super().__init__()
         self.num_frames = config.num_frames
-        self.hidden_dim = 4096  # Ministral LM hidden dim (post-projector)
 
-        # Learned embeddings: one per frame
+        # Learned embeddings: one per frame, at vision encoder dim
         self.temporal_embeddings = nn.Embedding(
-            self.num_frames, self.hidden_dim
+            self.num_frames, _VISION_DIM
         )
         # Initialize small so we don't disrupt pre-trained representations
         nn.init.normal_(self.temporal_embeddings.weight, std=0.02)
@@ -47,94 +54,116 @@ class TemporalPositionEncoding(ForwardMod):
         self._hook_handle = None
 
     def apply(self, model: nn.Module) -> nn.Module:
-        """Register a forward hook on the multimodal projector."""
-        # Find the projector
-        projector = None
-        for attr in ["multi_modal_projector", "mm_projector", "projector"]:
-            if hasattr(model, attr):
-                projector = getattr(model, attr)
+        """Register a forward hook on the vision tower (before merger)."""
+        base = getattr(model, "base_model", model)
+        base = getattr(base, "model", base)
+
+        # Find the vision tower
+        vision_tower = None
+        for attr in ["vision_tower", "vision_model", "visual"]:
+            candidate = getattr(base, attr, None)
+            if candidate is not None:
+                vision_tower = candidate
                 break
 
-        if projector is None:
-            # Try through base_model (PeftModel wrapping)
-            base = getattr(model, "base_model", model)
-            base = getattr(base, "model", base)
-            for attr in ["multi_modal_projector", "mm_projector", "projector"]:
-                if hasattr(base, attr):
-                    projector = getattr(base, attr)
-                    break
-
-        if projector is None:
+        if vision_tower is None:
             logger.warning(
-                "Could not find multimodal projector — "
+                "Could not find vision tower — "
                 "temporal_position mod not applied."
             )
             return model
 
-        # Move embeddings to same device
-        device = next(projector.parameters()).device
-        self.temporal_embeddings = self.temporal_embeddings.to(device)
+        # Move embeddings to same device/dtype
+        device = next(vision_tower.parameters()).device
+        dtype = next(vision_tower.parameters()).dtype
+        self.temporal_embeddings = self.temporal_embeddings.to(
+            device=device, dtype=dtype
+        )
 
-        # Register hook that adds temporal embeddings after projection
+        # Register hook on vision tower output
         def _add_temporal_hook(module, input, output):
             return self._add_temporal_embeddings(output)
 
-        self._hook_handle = projector.register_forward_hook(_add_temporal_hook)
+        self._hook_handle = vision_tower.register_forward_hook(
+            _add_temporal_hook
+        )
         logger.info(
             "Registered temporal position hook on %s "
-            "(num_frames=%d, tokens_per_frame=%d)",
-            projector.__class__.__name__,
+            "(num_frames=%d, dim=%d)",
+            vision_tower.__class__.__name__,
             self.num_frames,
-            _TOKENS_PER_FRAME,
+            _VISION_DIM,
         )
 
         return model
 
-    def _add_temporal_embeddings(self, projected: torch.Tensor) -> torch.Tensor:
-        """Add frame-index embeddings to projected vision tokens.
+    def _add_temporal_embeddings(self, vit_output):
+        """Add frame-index embeddings to vision tower output.
 
-        ``projected`` shape: (batch, num_vision_tokens, hidden_dim)
-        where num_vision_tokens = num_frames * tokens_per_frame.
+        Vision tower output can be:
+        - A tensor of shape (batch, total_patches, 1024)
+        - A tuple/list where first element is the tensor
+        - A BaseModelOutput-like object with .last_hidden_state
+
+        We need to handle all cases and return the same type.
         """
-        if projected.dim() != 3:
-            return projected
-
-        total_tokens = projected.shape[1]
-        expected = self.num_frames * _TOKENS_PER_FRAME
-
-        if total_tokens != expected:
-            # Mismatch — could be different number of frames or image size.
-            # Try to infer num_frames from total.
-            if total_tokens % _TOKENS_PER_FRAME == 0:
-                actual_frames = total_tokens // _TOKENS_PER_FRAME
-                if actual_frames > self.num_frames:
-                    actual_frames = self.num_frames
-            else:
-                # Can't cleanly split — skip
-                return projected
-
-            frame_indices = torch.arange(
-                actual_frames, device=projected.device
-            )
+        # Extract the hidden states tensor
+        if isinstance(vit_output, torch.Tensor):
+            hidden = vit_output
+            return_tensor = True
+        elif isinstance(vit_output, (tuple, list)):
+            hidden = vit_output[0]
+            return_tensor = False
+        elif hasattr(vit_output, "last_hidden_state"):
+            hidden = vit_output.last_hidden_state
+            return_tensor = False
         else:
-            frame_indices = torch.arange(
-                self.num_frames, device=projected.device
-            )
+            return vit_output
 
-        num_frames = frame_indices.shape[0]
-        # (num_frames, hidden_dim)
-        embeddings = self.temporal_embeddings(frame_indices)
-        # Expand to (num_frames * tokens_per_frame, hidden_dim)
-        embeddings = embeddings.unsqueeze(1).expand(
-            -1, _TOKENS_PER_FRAME, -1
-        ).reshape(num_frames * _TOKENS_PER_FRAME, -1)
+        if hidden.dim() != 3:
+            return vit_output
 
-        # Add to the first (num_frames * tokens_per_frame) tokens
-        n = min(embeddings.shape[0], projected.shape[1])
-        result = projected.clone()
-        result[:, :n, :] = result[:, :n, :] + embeddings[:n].unsqueeze(0)
+        B, total_patches, D = hidden.shape
 
-        return result
+        # Infer patches per frame
+        if total_patches == 0:
+            return vit_output
+
+        # Try to split evenly across frames
+        num_frames = self.num_frames
+        if total_patches % num_frames != 0:
+            # Variable number of patches — try to use what we can
+            patches_per_frame = total_patches // num_frames
+            if patches_per_frame == 0:
+                return vit_output
+            usable = patches_per_frame * num_frames
+        else:
+            patches_per_frame = total_patches // num_frames
+            usable = total_patches
+
+        # Build frame indices: [0,0,...,0, 1,1,...,1, 2,2,...,2, 3,3,...,3]
+        frame_ids = torch.arange(
+            num_frames, device=hidden.device
+        ).repeat_interleave(patches_per_frame)  # (usable,)
+
+        # Get embeddings: (usable, D)
+        embeddings = self.temporal_embeddings(frame_ids)
+
+        # Add to hidden states
+        result = hidden.clone()
+        result[:, :usable, :] = result[:, :usable, :] + embeddings.unsqueeze(0)
+
+        # Return in same format as input
+        if return_tensor:
+            return result
+        elif isinstance(vit_output, tuple):
+            return (result,) + vit_output[1:]
+        elif isinstance(vit_output, list):
+            return [result] + list(vit_output[1:])
+        else:
+            # BaseModelOutput-like
+            vit_output.last_hidden_state = result
+            return vit_output
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Not used directly — logic is in the hook."""

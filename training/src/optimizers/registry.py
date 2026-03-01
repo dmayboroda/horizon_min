@@ -1,4 +1,14 @@
-"""Optimizer registry — create optimizer by name from config."""
+"""Optimizer registry — create optimizer by name from config.
+
+Supports: adamw, adamw_8bit, muon, soap, shampoo, prodigy.
+
+Install commands:
+    pip install bitsandbytes          # adamw_8bit
+    pip install muon                  # muon (MuonWithAuxAdam)
+    pip install distributed_shampoo   # shampoo
+    pip install prodigyopt            # prodigy
+    # SOAP is bundled as soap_impl.py (no install needed)
+"""
 
 from __future__ import annotations
 
@@ -13,28 +23,64 @@ from ..config import OptimizerConfig, TrainingConfig
 logger = logging.getLogger(__name__)
 
 
+def get_optimizer(
+    name: str,
+    params: Iterator[nn.Parameter] | list[dict],
+    lr: float = 1e-5,
+    weight_decay: float = 0.01,
+    **kwargs,
+) -> torch.optim.Optimizer:
+    """Simple API: create an optimizer by name with explicit lr.
+
+    Parameters
+    ----------
+    name
+        Optimizer name (adamw, adamw_8bit, muon, soap, shampoo, prodigy).
+    params
+        Model parameters (or param groups).
+    lr
+        Learning rate.
+    weight_decay
+        Weight decay.
+
+    Returns
+    -------
+    torch.optim.Optimizer
+    """
+    opt_config = OptimizerConfig(name=name)
+    train_config = TrainingConfig(learning_rate=lr, weight_decay=weight_decay)
+    return create_optimizer(params, opt_config, train_config)
+
+
 def create_optimizer(
     params: Iterator[nn.Parameter] | list[dict],
     opt_config: OptimizerConfig,
     train_config: TrainingConfig,
+    *,
+    named_params: list[tuple[str, nn.Parameter]] | None = None,
 ) -> torch.optim.Optimizer:
     """Create an optimizer by name.
 
     Parameters
     ----------
     params
-        Model parameters (or param groups).
+        Model parameters (or param groups).  Used by all optimizers
+        except muon (which needs named_params for ndim split).
     opt_config
         Optimizer-specific configuration.
     train_config
         Training config (for lr, weight_decay).
+    named_params
+        Optional list of (name, param) tuples.  Required for Muon
+        to split params by ndim (>=2D -> Muon, 1D -> AdamW).
 
     Returns
     -------
     torch.optim.Optimizer
     """
     name = opt_config.name.lower()
-    lr = train_config.learning_rate
+    # Prefer optimizer-specific LR, fall back to training.learning_rate
+    lr = opt_config.lr if opt_config.lr is not None else train_config.learning_rate
     wd = train_config.weight_decay
 
     if name == "adamw":
@@ -42,7 +88,7 @@ def create_optimizer(
     elif name == "adamw_8bit":
         return _create_adamw_8bit(params, lr, wd, opt_config)
     elif name == "muon":
-        return _create_muon(params, lr, wd, opt_config)
+        return _create_muon(params, lr, wd, opt_config, named_params=named_params)
     elif name == "soap":
         return _create_soap(params, lr, wd, opt_config)
     elif name == "shampoo":
@@ -93,37 +139,82 @@ def _create_adamw_8bit(params, lr, wd, opt_config):
 
 
 # ---------------------------------------------------------------------------
-#  Muon
+#  Muon (MuonWithAuxAdam — splits params by ndim)
 # ---------------------------------------------------------------------------
-def _create_muon(params, lr, wd, opt_config):
+def _create_muon(params, lr, wd, opt_config, *, named_params=None):
+    """Create Muon optimizer with auxiliary AdamW for 1D params.
+
+    Muon only works on >=2D weight matrices (uses Newton-Schulz
+    orthogonalisation).  1D params (biases, norms, embeddings) must
+    be handled by a separate AdamW.  ``MuonWithAuxAdam`` does this
+    split internally.
+
+    If ``named_params`` is provided, we split by ``param.ndim >= 2``.
+    Otherwise, we fall back to splitting from the flat param list.
+    """
     try:
-        from muon import Muon
+        from muon import MuonWithAuxAdam
     except ImportError:
         raise ImportError(
-            "muon required. Install with: pip install muon"
+            "muon required. Install with: pip install muon\n"
+            "Requires MuonWithAuxAdam for proper param splitting."
         )
 
+    # Split params by ndim
+    muon_params = []
+    adam_params = []
+
+    if named_params is not None:
+        for name, param in named_params:
+            if not param.requires_grad:
+                continue
+            if param.ndim >= 2:
+                muon_params.append(param)
+            else:
+                adam_params.append(param)
+    else:
+        # Fallback: split from flat param list
+        param_list = list(params) if not isinstance(params, list) else params
+        for p in param_list:
+            if not p.requires_grad:
+                continue
+            if p.ndim >= 2:
+                muon_params.append(p)
+            else:
+                adam_params.append(p)
+
     logger.info(
-        "Creating Muon optimizer (lr=%.2e, momentum=%.2f, nesterov=%s)",
-        lr, opt_config.muon_momentum, opt_config.muon_nesterov,
+        "Creating MuonWithAuxAdam optimizer "
+        "(muon_lr=%.2e, %d muon params [>=2D], %d adam params [1D], "
+        "momentum=%.2f, nesterov=%s)",
+        lr, len(muon_params), len(adam_params),
+        opt_config.muon_momentum, opt_config.muon_nesterov,
     )
-    return Muon(
-        params,
+
+    return MuonWithAuxAdam(
+        muon_params=muon_params,
         lr=lr,
         momentum=opt_config.muon_momentum,
         nesterov=opt_config.muon_nesterov,
+        ns_steps=5,
+        adamw_params=adam_params,
+        adamw_lr=3e-4,
+        adamw_betas=(0.9, 0.95),
+        adamw_wd=wd,
     )
 
 
 # ---------------------------------------------------------------------------
-#  SOAP
+#  SOAP (bundled from nikhilvyas/SOAP)
 # ---------------------------------------------------------------------------
 def _create_soap(params, lr, wd, opt_config):
     try:
-        from soap import SOAP
+        from .soap_impl import SOAP
     except ImportError:
         raise ImportError(
-            "SOAP required. Install with: pip install soap-optimizer"
+            "SOAP implementation not found. "
+            "Expected soap_impl.py in training/src/optimizers/. "
+            "Download from: https://github.com/nikhilvyas/SOAP"
         )
 
     logger.info(
@@ -141,34 +232,40 @@ def _create_soap(params, lr, wd, opt_config):
 
 
 # ---------------------------------------------------------------------------
-#  Shampoo (distributed_shampoo from PyTorch)
+#  Shampoo (distributed_shampoo — single-GPU mode)
 # ---------------------------------------------------------------------------
 def _create_shampoo(params, lr, wd, opt_config):
     try:
-        from distributed_shampoo import DistributedShampoo
+        from distributed_shampoo.distributed_shampoo import DistributedShampoo
+        from distributed_shampoo.shampoo_types import AdamGraftingConfig
     except ImportError:
-        try:
-            from optimizers.shampoo import Shampoo as DistributedShampoo
-        except ImportError:
-            raise ImportError(
-                "Shampoo required. Install with: "
-                "pip install distributed-shampoo or provide a local implementation."
-            )
+        raise ImportError(
+            "distributed_shampoo required. "
+            "Install with: pip install distributed-shampoo"
+        )
 
     logger.info(
-        "Creating Shampoo optimizer (lr=%.2e, update_freq=%d)",
+        "Creating Shampoo optimizer (lr=%.2e, update_freq=%d, single-GPU mode)",
         lr, opt_config.shampoo_update_freq,
     )
+
+    # Single-GPU config: no distributed_config, use AdamGraftingConfig
     return DistributedShampoo(
         params,
         lr=lr,
+        betas=opt_config.betas,
+        epsilon=opt_config.eps,
         weight_decay=wd,
         precondition_frequency=opt_config.shampoo_update_freq,
+        grafting_config=AdamGraftingConfig(
+            beta2=opt_config.betas[1],
+            epsilon=opt_config.eps,
+        ),
     )
 
 
 # ---------------------------------------------------------------------------
-#  Prodigy
+#  Prodigy (learning-rate-free)
 # ---------------------------------------------------------------------------
 def _create_prodigy(params, lr, wd, opt_config):
     try:

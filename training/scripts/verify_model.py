@@ -10,6 +10,9 @@ Usage::
 
     # With 4-bit quantization (saves VRAM)
     python scripts/verify_model.py --quantize
+
+    # Config-only mode (no model download — just verify config)
+    python scripts/verify_model.py --config-only
 """
 
 from __future__ import annotations
@@ -32,6 +35,115 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+def _register_ministral3_if_needed():
+    """Register the ministral3 text model type if not already known.
+
+    The Ministral-3-8B multimodal config references ``ministral3`` as the
+    text model type, but some transformers versions don't have it in
+    CONFIG_MAPPING.  We map it to ``mistral`` which is functionally
+    equivalent for loading purposes.
+    """
+    try:
+        from transformers import AutoConfig
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+        if "ministral3" not in CONFIG_MAPPING:
+            # Map ministral3 → mistral (same architecture, different name)
+            from transformers import MistralConfig
+
+            CONFIG_MAPPING.register("ministral3", MistralConfig, exist_ok=True)
+            logger.info("Registered 'ministral3' → MistralConfig in CONFIG_MAPPING")
+        else:
+            logger.info("'ministral3' already in CONFIG_MAPPING")
+    except Exception as e:
+        logger.warning("Could not register ministral3: %s", e)
+        # Try alternate approach
+        try:
+            from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+            if "ministral3" not in CONFIG_MAPPING_NAMES:
+                CONFIG_MAPPING_NAMES["ministral3"] = "MistralConfig"
+                logger.info("Registered 'ministral3' via CONFIG_MAPPING_NAMES")
+        except Exception as e2:
+            logger.warning("Fallback registration also failed: %s", e2)
+
+
+def _test_spatial_decoder():
+    """Test SpatialDecoder and ActionHead forward pass + gradient flow."""
+    from src.forward_mods.spatial_decoder import (
+        ActionHead,
+        SpatialDecoder,
+        SpatialDecoderLayer,
+    )
+
+    print("\n  --- Spatial Decoder Test ---")
+
+    # Test SpatialDecoderLayer
+    layer = SpatialDecoderLayer(hidden_dim=4096, num_heads=32, intermediate_dim=4096)
+    dummy_input = torch.randn(1, 128, 4096)
+    output = layer(dummy_input)
+    assert isinstance(output, tuple)
+    assert output[0].shape == (1, 128, 4096)
+    print(f"    SpatialDecoderLayer: input {dummy_input.shape} → output {output[0].shape} ✓")
+
+    # Test ActionHead
+    head = ActionHead(hidden_dim=4096, action_dim=3, action_hidden_dim=256)
+    dummy_hidden = torch.randn(2, 128, 4096, requires_grad=True)
+    mean, log_std = head(dummy_hidden)
+    assert mean.shape == (2, 3), f"Expected (2, 3), got {mean.shape}"
+    assert log_std.shape == (2, 3), f"Expected (2, 3), got {log_std.shape}"
+    print(f"    ActionHead: hidden {dummy_hidden.shape} → mean {mean.shape}, log_std {log_std.shape} ✓")
+
+    # Verify mean is in [0, 1] (Sigmoid)
+    assert mean.min() >= 0.0 and mean.max() <= 1.0, f"Mean should be in [0,1], got [{mean.min()}, {mean.max()}]"
+    print(f"    ActionHead mean range: [{mean.min():.4f}, {mean.max():.4f}] (should be [0, 1]) ✓")
+
+    # Test gradient flow
+    loss = mean.sum() + log_std.sum()
+    loss.backward()
+    assert dummy_hidden.grad is not None, "Gradient did not flow back to hidden states"
+    assert dummy_hidden.grad.abs().sum() > 0, "Gradient is all zeros"
+    print(f"    Gradient flow through ActionHead: ✓ (grad norm = {dummy_hidden.grad.norm():.6f})")
+
+    # Test with pool_mask
+    pool_mask = torch.zeros(2, 128, dtype=torch.bool)
+    pool_mask[:, :64] = True
+    dummy_hidden2 = torch.randn(2, 128, 4096)
+    mean2, log_std2 = head(dummy_hidden2, pool_mask=pool_mask)
+    assert mean2.shape == (2, 3)
+    print(f"    ActionHead with pool_mask: ✓")
+
+    # Count parameters
+    head_params = sum(p.numel() for p in head.parameters())
+    layer_params = sum(p.numel() for p in layer.parameters())
+    print(f"    ActionHead parameters: {head_params:,}")
+    print(f"    SpatialDecoderLayer parameters: {layer_params:,}")
+    print(f"    Spatial decoder test PASSED ✓")
+
+
+def _test_forward_mods_config():
+    """Verify forward_mod configs load and apply correctly."""
+    from src.config import ForwardModConfig
+
+    print("\n  --- Forward Mod Config Test ---")
+
+    # Text baseline: no mods
+    cfg_text = ForwardModConfig(enabled=False, mode="text")
+    assert cfg_text.names == [], f"Expected empty names, got {cfg_text.names}"
+    print(f"    Text baseline: names={cfg_text.names} ✓")
+
+    # Action full: all mods
+    cfg_full = ForwardModConfig(
+        enabled=True, mode="action",
+        temporal_position=True, cross_frame_attention=True, spatial_decoder=True,
+    )
+    expected = ["temporal_position", "cross_frame_attention", "spatial_decoder"]
+    assert cfg_full.names == expected, f"Expected {expected}, got {cfg_full.names}"
+    print(f"    Action full: names={cfg_full.names} ✓")
+
+    print(f"    Forward mod config test PASSED ✓")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Verify Ministral 3 8B architecture")
     parser.add_argument(
@@ -45,9 +157,28 @@ def main():
         action="store_true",
         help="Load in 4-bit (QLoRA-ready)",
     )
+    parser.add_argument(
+        "--config-only",
+        action="store_true",
+        help="Only verify config and spatial decoder (no model download)",
+    )
     args = parser.parse_args()
 
     model_name = args.model_name
+
+    # Always test spatial decoder (no model needed)
+    _test_spatial_decoder()
+    _test_forward_mods_config()
+
+    if args.config_only:
+        print("\n  --- Config-only mode: skipping model download ---")
+        print("\n" + "=" * 80)
+        print("  CONFIG VERIFICATION COMPLETE")
+        print("=" * 80 + "\n")
+        return
+
+    # Register ministral3 before any model loading
+    _register_ministral3_if_needed()
 
     # ---- 1. Load processor ----
     logger.info("Loading processor from %s ...", model_name)
@@ -63,12 +194,8 @@ def main():
         "torch_dtype": torch.bfloat16,
         "device_map": "auto",
         "trust_remote_code": True,
+        "attn_implementation": "sdpa",  # safe on all platforms
     }
-
-    try:
-        load_kwargs["attn_implementation"] = "flash_attention_2"
-    except Exception:
-        logger.warning("flash_attention_2 not available, using default attention")
 
     if args.quantize:
         from transformers import BitsAndBytesConfig
@@ -113,7 +240,6 @@ def main():
             break
 
     if vision_tower is None:
-        # Check nested
         for name, mod in model.named_modules():
             if "vision" in name.lower() and hasattr(mod, "config"):
                 vision_tower = mod
@@ -173,7 +299,6 @@ def main():
             break
 
     if lm is None:
-        # Try deeper nesting
         for name, mod in model.named_children():
             if hasattr(mod, "model") and hasattr(mod.model, "layers"):
                 lm = mod
@@ -188,7 +313,6 @@ def main():
         lm_params = sum(p.numel() for p in lm.parameters())
         print(f"    LM params: {lm_params:,} ({lm_params / 1e9:.2f}B)")
 
-        # Find layers
         layers = None
         if hasattr(lm, "layers"):
             layers = lm.layers
@@ -199,7 +323,6 @@ def main():
             num_layers = len(layers)
             print(f"    Number of transformer layers: {num_layers}")
 
-            # Print first layer structure
             first_layer = layers[0]
             print(f"    Layer 0 class: {first_layer.__class__.__name__}")
             for name, child in first_layer.named_children():
@@ -214,11 +337,9 @@ def main():
                             f"        {sub_name}: Linear({sub_child.in_features}, {sub_child.out_features})"
                         )
 
-            # Print last layer to confirm same structure
             last_layer = layers[-1]
             print(f"\n    Layer {num_layers - 1} class: {last_layer.__class__.__name__}")
 
-        # LM head
         lm_head = None
         if hasattr(lm, "lm_head"):
             lm_head = lm.lm_head
@@ -234,7 +355,6 @@ def main():
                 print(f"      -> hidden_dim = {lm_head.in_features}")
                 print(f"      -> vocab_size = {lm_head.out_features}")
 
-        # Config details
         if hasattr(lm, "config"):
             lm_config = lm.config
         elif hasattr(model, "config") and hasattr(model.config, "text_config"):
@@ -265,7 +385,6 @@ def main():
     for name, mod in model.named_modules():
         if isinstance(mod, torch.nn.Linear):
             shape = f"({mod.in_features}, {mod.out_features})"
-            # Get the short suffix (e.g., "q_proj", "k_proj")
             short = name.rsplit(".", 1)[-1]
             if short not in linear_shapes:
                 linear_shapes[short] = set()
@@ -315,13 +434,17 @@ def main():
     except Exception as e:
         logger.warning("LoRA application failed: %s", e)
 
-    # ---- 12. VRAM usage ----
+    # ---- 12. Memory usage ----
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1e9
         reserved = torch.cuda.memory_reserved() / 1e9
         print(f"\n  --- VRAM Usage ---")
         print(f"    Allocated: {allocated:.2f} GB")
         print(f"    Reserved:  {reserved:.2f} GB")
+    elif torch.backends.mps.is_available():
+        allocated = torch.mps.current_allocated_memory() / 1e9
+        print(f"\n  --- MPS Memory Usage ---")
+        print(f"    Allocated: {allocated:.2f} GB")
 
     # ---- 13. Dummy forward pass ----
     print("\n  --- Dummy Forward Pass ---")
@@ -361,7 +484,6 @@ def main():
         if "image_sizes" in inputs:
             print(f"    Image sizes: {inputs['image_sizes']}")
 
-        # Forward pass (no generate, just forward for logits)
         with torch.no_grad():
             outputs = model(**inputs)
 
