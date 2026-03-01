@@ -4,9 +4,10 @@ emoji: "\U0001F3AF"
 colorFrom: green
 colorTo: blue
 sdk: gradio
-sdk_version: "4.44.0"
+sdk_version: "5.29.0"
 app_file: app.py
 hardware: t4-small
+python_version: "3.12"
 models:
   - dmayboroda/dh_ministal_gpro
   - mistralai/Ministral-3-8B-Instruct-2512-BF16
