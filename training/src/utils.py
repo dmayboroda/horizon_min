@@ -89,33 +89,13 @@ TOOLS = [SHOOT_TOOL]
 # 4.1  System prompt template
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT_TEMPLATE = """\
-You are a Duck Hunt game AI agent. Your goal is to shoot flying ducks.
+You are a Duck Hunt AI. Shoot flying ducks by calling the shoot tool.
 
-GAME RULES:
-- Two ducks fly simultaneously per match.
-- You have 3 bullets per match.
-- Ducks bounce off screen edges and fly in the upper half (y ~ 0.0-0.5).
-- A match lasts 30 seconds; the game ends after 4 total missed ducks.
+You see {num_frames} frames. Latency: {processing_latency_frames} frames.
+Coordinates: x (0=left, 1=right), y (0=top, 1=bottom).
+Predict where the duck will be after latency + horizon frames.
 
-OBSERVATION:
-- You receive {num_frames} consecutive game frames (oldest to newest).
-- Use the frame sequence to estimate each duck's velocity and direction.
-
-PROCESSING LATENCY:
-- Your observation is {processing_latency_frames} frames old by the time your shot executes.
-- Total prediction distance = processing_latency_frames + horizon.
-
-COORDINATE SYSTEM (normalised 0.0-1.0):
-- x: 0.0 = left, 1.0 = right
-- y: 0.0 = top, 1.0 = bottom
-
-STRATEGY:
-- Identify duck positions across the frames.
-- Estimate velocity from frame-to-frame displacement.
-- Lead your shot: predict position after (processing_latency_frames + horizon) frames.
-- Low horizon (0-5) for slow ducks; higher horizon (10-20) for fast ducks.
-
-Always call the shoot tool with your best prediction."""
+IMPORTANT: Respond ONLY with the tool call. Do NOT explain your reasoning."""
 
 
 def format_system_prompt(
@@ -186,18 +166,25 @@ def build_prompt(
         user_content.append({"type": "image", "image": img})
 
     state_text = (
-        f"Frame sequence: {num_frames} frames (oldest to newest).\n"
-        f"Round {state.get('round_number', '?')}, "
-        f"match {state.get('match_number', '?')}. "
-        f"Ducks flying: {state.get('ducks_flying', '?')}. "
-        f"Bullets remaining: {state.get('bullets_remaining', '?')}. "
-        f"Latency: {latency_frames} frames.\n\n"
-        "Call the shoot tool now."
+        f"{num_frames} frames, {state.get('ducks_flying', '?')} ducks flying, "
+        f"latency {latency_frames} frames. Shoot now."
     )
     user_content.append({"type": "text", "text": state_text})
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        # Few-shot example so the model knows the expected output format
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": (
+                "Frame sequence: 4 frames. Ducks flying: 2. "
+                "Latency: 6 frames. Call the shoot tool now."
+            )}],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": '[TOOL_CALLS] [{"name": "shoot", "arguments": {"x": 0.45, "y": 0.25, "horizon": 8}, "id": "abc123xyz"}]'}],
+        },
         {"role": "user", "content": user_content},
     ]
 
@@ -270,6 +257,20 @@ def parse_tool_call(
                         args.get("horizon", 0),
                         max_horizon,
                     )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
+    # --- attempt 1b: Ministral [TOOL_CALLS]name[ARGS]{...} format ---
+    args_match = re.search(
+        r"\[TOOL_CALLS\]\s*\w+\s*\[ARGS\]\s*(\{.*?\})", output_text, re.DOTALL
+    )
+    if args_match:
+        try:
+            args = json.loads(args_match.group(1))
+            if "x" in args and "y" in args:
+                return _build_action(
+                    args["x"], args["y"], args.get("horizon", 0), max_horizon
+                )
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
 

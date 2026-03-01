@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import random
 import shutil
 from pathlib import Path
 
@@ -159,10 +160,19 @@ class DuckHuntGRPOTrainer:
 
         self.device = next(model.parameters()).device
 
+        # Enable gradient checkpointing to save memory
+        if train.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled")
+
         # Checkpoint tracking
         self.global_step = 0
         self.best_eval_hit_rate = -1.0
+        self._reward_baseline = 0.0  # running average for advantage when std=0
         self._saved_checkpoints: list[Path] = []
+        self._last_grad_norm = 0.0
+        self._total_hits = 0
+        self._total_shots = 0
 
         # Sample outputs buffer for W&B table logging
         self._sample_outputs: list[dict] = []
@@ -283,12 +293,21 @@ class DuckHuntGRPOTrainer:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), train.max_grad_norm
                 )
-                metrics["gradient_norm"] = grad_norm.item()
+                self._last_grad_norm = grad_norm.item()
 
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.global_step += 1
+
+            # Track hit rate
+            rewards = batch["rewards"]
+            self._total_shots += len(rewards)
+            self._total_hits += sum(1 for r in rewards if r > 0)
+            metrics["gradient_norm"] = self._last_grad_norm
+            metrics["hit_rate"] = self._total_hits / max(self._total_shots, 1)
+            metrics["total_hits"] = self._total_hits
+            metrics["total_shots"] = self._total_shots
 
             # 4. Logging
             if (step + 1) % train.logging_steps == 0:
@@ -329,19 +348,17 @@ class DuckHuntGRPOTrainer:
         grpo = self.cfg.grpo
         G = grpo.num_generations
 
-        if self.env.is_done():
-            self.env.reset()
-
-        # Get current state
-        frames = self.env.get_frames()
-        state = self.env.get_state()
-
-        if state.get("ducks_flying", 0) == 0:
-            self.env.advance_frames(15)
+        # Find a state with flying ducks (retry up to 20 times)
+        for _attempt in range(20):
             if self.env.is_done():
                 self.env.reset()
             frames = self.env.get_frames()
             state = self.env.get_state()
+            if state.get("ducks_flying", 0) > 0 and len(frames) > 0:
+                break
+            self.env.advance_frames(random.randint(10, 30))
+        else:
+            logger.warning("Could not find flying ducks after 20 attempts, using current state")
 
         # Build prompt
         messages, tools = build_prompt(frames, state)
@@ -378,12 +395,14 @@ class DuckHuntGRPOTrainer:
         # Decode and compute rewards
         completion_ids_list = []
         rewards = []
+        completions_text = []
 
         for i in range(G):
             comp_ids = output_ids[i, prompt_len:]
             completion_ids_list.append(comp_ids)
 
             decoded = self.processor.decode(comp_ids, skip_special_tokens=False)
+            completions_text.append(decoded)
             action = parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
 
             if action is not None:
@@ -394,19 +413,18 @@ class DuckHuntGRPOTrainer:
             reward = compute_reward(result, action, self.cfg.reward)
             rewards.append(reward)
 
-            # Buffer sample outputs for W&B table
-            self._sample_outputs.append({
-                "step": self.global_step,
-                "generation_idx": i,
-                "output": decoded[:500],
-                "action": f"x={action.x:.3f}, y={action.y:.3f}, h={action.horizon}" if action else "INVALID",
-                "reward": reward,
-                "hit": bool(result.get("hit_a") or result.get("hit_b")) if action else False,
-            })
-            # Keep buffer bounded
-            max_samples = self.cfg.logging.num_completions_to_print * 20
-            if len(self._sample_outputs) > max_samples:
-                self._sample_outputs = self._sample_outputs[-max_samples:]
+            # Log full completion to console
+            action_str = f"x={action.x:.3f}, y={action.y:.3f}, h={action.horizon}" if action else "INVALID"
+            hit_str = ""
+            if action:
+                hit_str = f" hit_a={result['hit_a']} hit_b={result['hit_b']}"
+            logger.info(
+                "  [gen %d] reward=%.2f action=%s%s\n    output: %s",
+                i, reward, action_str, hit_str, decoded,
+            )
+
+        # Log frames and completions to W&B
+        self._log_batch_to_wandb(frames, completions_text, rewards)
 
         # Advance the real environment
         self.env.advance_frames(10)
@@ -434,13 +452,18 @@ class DuckHuntGRPOTrainer:
         mean_r = rewards_t.mean()
         std_r = rewards_t.std()
         if std_r < 1e-8:
-            advantages = torch.zeros_like(rewards_t)
+            # All rewards identical — use running baseline so the model
+            # still gets a gradient signal (REINFORCE-style).
+            advantages = rewards_t - self._reward_baseline
         else:
             advantages = (rewards_t - mean_r) / std_r
+        # Update running baseline (exponential moving average)
+        self._reward_baseline = 0.95 * self._reward_baseline + 0.05 * mean_r.item()
         advantages = advantages.to(self.device)
 
         total_loss = torch.tensor(0.0, device=self.device)
         total_kl = 0.0
+        total_entropy = 0.0
         total_clip = 0
 
         for i in range(G):
@@ -461,6 +484,12 @@ class DuckHuntGRPOTrainer:
             comp_labels = full_ids[:, prompt_len:]
 
             log_probs = _log_probs_from_logits(logits, comp_labels)  # (1, comp_len)
+
+            # --- 2b. Token-level entropy (prevents mode collapse) ---
+            probs = F.softmax(logits, dim=-1)
+            log_probs_full = F.log_softmax(logits, dim=-1)
+            entropy = -(probs * log_probs_full).sum(dim=-1).mean()  # scalar
+            total_entropy += entropy.item()
 
             # --- 3. Reference log-probs ---
             if self.ref_model is not None:
@@ -487,7 +516,8 @@ class DuckHuntGRPOTrainer:
             kl = (log_probs - ref_log_probs).mean()
             total_kl += kl.item()
 
-            loss_i = policy_loss + grpo.beta * kl
+            # --- 6. Entropy bonus (subtract to maximize entropy) ---
+            loss_i = policy_loss + grpo.beta * kl - grpo.entropy_coeff * entropy
             total_loss = total_loss + loss_i
 
         total_loss = total_loss / max(G, 1)
@@ -497,6 +527,7 @@ class DuckHuntGRPOTrainer:
             "mean_reward": mean_r.item(),
             "std_reward": std_r.item(),
             "mean_kl": total_kl / max(G, 1),
+            "mean_entropy": total_entropy / max(G, 1),
             "advantages_mean": advantages.mean().item(),
         }
 
@@ -723,15 +754,45 @@ class DuckHuntGRPOTrainer:
     # ------------------------------------------------------------------
     #  Logging
     # ------------------------------------------------------------------
+    def _log_batch_to_wandb(
+        self,
+        frames: list,
+        completions: list[str],
+        rewards: list[float],
+    ) -> None:
+        """Log observation frames and full completions to W&B."""
+        if not self._wandb_active or wandb.run is None:
+            return
+
+        log_dict: dict = {}
+
+        # Log observation frames as images
+        wandb_images = []
+        for i, frame in enumerate(frames):
+            wandb_images.append(wandb.Image(frame, caption=f"frame_{i}"))
+        if wandb_images:
+            log_dict["train/observation_frames"] = wandb_images
+
+        # Log completions as a table
+        comp_table = wandb.Table(columns=["gen_idx", "completion", "reward"])
+        for i, (text, reward) in enumerate(zip(completions, rewards)):
+            comp_table.add_data(i, text, reward)
+        log_dict["train/completions"] = comp_table
+
+        wandb.log(log_dict)
+
     def _log_metrics(self, step: int, metrics: dict) -> None:
         lr = self.scheduler.get_last_lr()[0]
         grad_norm = metrics.get("gradient_norm", 0.0)
+        hit_rate = metrics.get("hit_rate", 0.0)
+        entropy = metrics.get("mean_entropy", 0.0)
         msg = (
             f"step={step + 1}  "
             f"loss={metrics.get('loss', 0):.4f}  "
             f"reward={metrics.get('mean_reward', 0):.3f} +/- {metrics.get('std_reward', 0):.3f}  "
-            f"kl={metrics.get('mean_kl', 0):.4f}  "
-            f"grad_norm={grad_norm:.4f}  "
+            f"hits={metrics.get('total_hits', 0)}/{metrics.get('total_shots', 0)} ({hit_rate:.1%})  "
+            f"entropy={entropy:.2f}  "
+            f"grad={grad_norm:.4f}  "
             f"lr={lr:.2e}"
         )
         logger.info(msg)
@@ -741,15 +802,15 @@ class DuckHuntGRPOTrainer:
                 "train/loss": metrics.get("loss", 0),
                 "train/mean_reward": metrics.get("mean_reward", 0),
                 "train/std_reward": metrics.get("std_reward", 0),
-                "train/kl": metrics.get("mean_kl", 0),
                 "train/learning_rate": lr,
                 "train/advantages_mean": metrics.get("advantages_mean", 0),
+                "train/gradient_norm": grad_norm,
+                "train/hit_rate": hit_rate,
+                "train/mean_entropy": entropy,
+                "train/total_hits": metrics.get("total_hits", 0),
                 "train/step": step + 1,
             }
-            # Only log gradient_norm on accumulation steps (when it's actually computed)
-            if "gradient_norm" in metrics:
-                log_dict["train/gradient_norm"] = grad_norm
-            wandb.log(log_dict, step=step + 1)
+            wandb.log(log_dict)
 
     def _log_eval_to_wandb(self, eval_metrics: dict, step: int) -> None:
         """Log rich evaluation data to W&B: metrics, histogram, table, chart."""
@@ -815,7 +876,7 @@ class DuckHuntGRPOTrainer:
 
         log_dict["eval/best_hit_rate"] = self.best_eval_hit_rate
 
-        wandb.log(log_dict, step=step + 1)
+        wandb.log(log_dict)
 
     # ------------------------------------------------------------------
     #  Checkpointing (9.1)
