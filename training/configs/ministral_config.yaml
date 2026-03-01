@@ -57,7 +57,7 @@ training:
   logging_steps: 1
   save_steps: 100
   save_total_limit: 3
-  eval_strategy: "steps"
+  eval_strategy: "no"
   eval_steps: 100
   seed: 42
   dataloader_num_workers: 2
