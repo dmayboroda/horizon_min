@@ -332,3 +332,47 @@ def _build_action(
     y = max(0.0, min(1.0, float(raw_y)))
     horizon = max(0, min(max_horizon, int(float(raw_horizon))))
     return Action(x=x, y=y, horizon=horizon)
+
+
+# ---------------------------------------------------------------------------
+# 4.5  Vision-only input builder (for action mode)
+# ---------------------------------------------------------------------------
+def build_vision_inputs(
+    frames: list[Image.Image],
+    processor,
+    state: dict,
+) -> dict:
+    """Build model inputs for action mode (vision-only, no text generation).
+
+    In action mode, we feed images through the full processor pipeline
+    but don't need the text generation prompt.  The model will produce
+    continuous actions via the ActionHead instead of text tokens.
+
+    Parameters
+    ----------
+    frames : list[Image.Image]
+        Observation frames (PIL, RGB).
+    processor
+        The model's processor (``AutoProcessor``).
+    state : dict
+        Game state from ``DuckHuntEnvWrapper.get_state()``.
+
+    Returns
+    -------
+    dict
+        Tokenised inputs ready for ``model(**inputs)``.
+    """
+    # Build full prompt (same as text mode) so vision tokens are properly
+    # positioned in the sequence
+    messages, tools = build_prompt(frames, state)
+
+    inputs = processor.apply_chat_template(
+        messages,
+        tools=tools,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+
+    return inputs

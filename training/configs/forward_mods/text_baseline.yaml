@@ -1,0 +1,7 @@
+# Text mode baseline — no forward mods (standard GRPO with tool calls)
+forward_mod:
+  enabled: false
+  mode: "text"
+
+logging:
+  wandb_run_name: "ministral-text-baseline"

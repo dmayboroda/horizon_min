@@ -1,0 +1,11 @@
+# Muon optimizer — momentum-based, no adaptive LR
+optimizer:
+  name: "muon"
+  muon_momentum: 0.95
+  muon_nesterov: true
+
+training:
+  learning_rate: 2.0e-2  # Muon typically uses higher LR
+
+logging:
+  wandb_run_name: "ministral-muon"

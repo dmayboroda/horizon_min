@@ -1,0 +1,20 @@
+# Action mode with spatial decoder only (no temporal/cross-frame mods)
+forward_mod:
+  enabled: true
+  mode: "action"
+  temporal_position: false
+  cross_frame_attention: false
+  spatial_decoder: true
+  decoder_start_layer: 30
+  action_dim: 3
+  action_hidden_dim: 256
+  log_std_init: -1.0
+  log_std_min: -5.0
+  log_std_max: 2.0
+  num_frames: 4
+
+reward:
+  distance_reward_weight: 0.5
+
+logging:
+  wandb_run_name: "ministral-action-spatial"

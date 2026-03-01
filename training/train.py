@@ -8,15 +8,17 @@ Usage::
     # Custom GRPO loop (fallback)
     python train.py --config configs/ministral_config.yaml --custom
 
+    # Layer configs (base + model + optimizer + forward_mod)
+    python train.py --custom \\
+        --config configs/base_config.yaml \\
+        --config configs/ministral_config.yaml \\
+        --config configs/optimizers/muon.yaml \\
+        --config configs/forward_mods/action_full.yaml
+
     # CLI overrides
     python train.py --config configs/ministral_config.yaml \\
         --override training.learning_rate=2e-5 \\
         --override grpo.num_generations=8
-
-    # Layer configs (base + model-specific)
-    python train.py \\
-        --config configs/base_config.yaml \\
-        --config configs/ministral_config.yaml
 
     # Resume from checkpoint (custom mode)
     python train.py --config configs/ministral_config.yaml --custom \\
@@ -39,7 +41,7 @@ from src.dataset import (
     make_format_reward_function,
     make_reward_function,
 )
-from src.model import load_model_and_processor, apply_lora
+from src.model import load_model_and_processor, apply_lora, setup_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -256,9 +258,8 @@ def train_custom(cfg: FullConfig, resume_from: str | None = None) -> None:
     # 1. Environment
     env = DuckHuntEnvWrapper(cfg.environment)
 
-    # 2. Model + LoRA
-    model, processor = load_model_and_processor(cfg.model)
-    model = apply_lora(model, cfg.lora)
+    # 2. Model + LoRA + forward mods (via setup_model)
+    model, processor = setup_model(cfg)
 
     # 3. Trainer
     trainer = DuckHuntGRPOTrainer(
@@ -270,6 +271,12 @@ def train_custom(cfg: FullConfig, resume_from: str | None = None) -> None:
 
     # 4. Train (with optional resume)
     logger.info("Starting custom GRPO training loop …")
+    logger.info(
+        "Mode: %s | Optimizer: %s | Forward mods: %s",
+        cfg.forward_mod.mode,
+        cfg.optimizer.name,
+        "enabled" if cfg.forward_mod.enabled else "disabled",
+    )
     trainer.train(resume_from=resume_from)
 
 

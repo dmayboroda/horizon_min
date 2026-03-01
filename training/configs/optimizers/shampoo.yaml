@@ -1,0 +1,7 @@
+# Shampoo optimizer — full-matrix preconditioning
+optimizer:
+  name: "shampoo"
+  shampoo_update_freq: 10
+
+logging:
+  wandb_run_name: "ministral-shampoo"

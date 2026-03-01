@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from .config import RewardConfig
 from .utils import Action
@@ -26,6 +27,8 @@ def compute_reward(
         * ``hit_a``  (bool) – duck A was hit
         * ``hit_b``  (bool) – duck B was hit
         * ``had_target`` (bool) – at least one duck was flying
+        * ``duck_a_pos`` (tuple[float, float], optional) – normalised (x, y)
+        * ``duck_b_pos`` (tuple[float, float], optional) – normalised (x, y)
     action : Action | None
         The parsed action, or ``None`` if the model's output could not be
         parsed into a valid tool call.
@@ -35,7 +38,7 @@ def compute_reward(
     Returns
     -------
     float
-        The total reward (base + horizon penalty).
+        The total reward (base + horizon penalty + distance shaping).
     """
     # ---- unparseable output ----
     if action is None:
@@ -66,4 +69,37 @@ def compute_reward(
         # no penalty on misses — same as the OpenEnv env
         penalty = 0.0
 
-    return base - penalty
+    reward = base - penalty
+
+    # ---- distance-based reward shaping (for misses in action mode) ----
+    if config.distance_reward_weight > 0 and not (hit_a or hit_b) and had_target:
+        distance_bonus = _compute_distance_reward(result, action)
+        reward += config.distance_reward_weight * distance_bonus
+
+    return reward
+
+
+def _compute_distance_reward(result: dict, action: Action) -> float:
+    """Compute a distance-based shaping reward for near misses.
+
+    Returns a value in [0, 1] — closer to a duck is better.
+    Uses the minimum distance to either duck (normalised).
+    """
+    min_dist = float("inf")
+
+    for key in ["duck_a_pos", "duck_b_pos"]:
+        pos = result.get(key)
+        if pos is None:
+            continue
+        dx = action.x - pos[0]
+        dy = action.y - pos[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+        min_dist = min(min_dist, dist)
+
+    if min_dist == float("inf"):
+        return 0.0
+
+    # Max possible distance in normalised space is sqrt(2) ≈ 1.414
+    # Convert to [0, 1] reward (closer = higher)
+    max_dist = math.sqrt(2.0)
+    return max(0.0, 1.0 - min_dist / max_dist)

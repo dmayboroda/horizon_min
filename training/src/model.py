@@ -9,7 +9,7 @@ from PIL import Image
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from .config import FullConfig, LoRAConfig, ModelConfig
+from .config import ForwardModConfig, FullConfig, LoRAConfig, ModelConfig
 from .utils import TOOLS, parse_tool_call
 
 logger = logging.getLogger(__name__)
@@ -48,13 +48,33 @@ def load_model_and_processor(
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
+    load_kwargs: dict = {
+        "torch_dtype": dtype,
+        "device_map": config.device_map,
+        "attn_implementation": config.attn_implementation,
+        "trust_remote_code": config.trust_remote_code,
+    }
+
+    # QLoRA: 4-bit quantization
+    if getattr(config, "quantize_4bit", False):
+        try:
+            from transformers import BitsAndBytesConfig
+
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=dtype,
+                bnb_4bit_use_double_quant=True,
+            )
+            load_kwargs["quantization_config"] = bnb_config
+            logger.info("QLoRA enabled: 4-bit NF4 quantization")
+        except ImportError:
+            logger.warning("bitsandbytes not available — loading without quantization")
+
     logger.info("Loading model from %s (dtype=%s) …", model_name, config.torch_dtype)
     model = AutoModelForImageTextToText.from_pretrained(
         model_name,
-        torch_dtype=dtype,
-        device_map=config.device_map,
-        attn_implementation=config.attn_implementation,
-        trust_remote_code=config.trust_remote_code,
+        **load_kwargs,
     )
 
     # ---- Diagnostics ----
@@ -208,7 +228,30 @@ def test_inference(
 # Convenience: full setup pipeline
 # ---------------------------------------------------------------------------
 def setup_model(config: FullConfig) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
-    """Load model → apply LoRA → return (model, processor)."""
+    """Load model → apply LoRA → apply forward_mods → return (model, processor).
+
+    Forward mods are applied *after* LoRA so they can modify the
+    architecture beyond LoRA's reach (e.g. replacing layers).
+    """
     model, processor = load_model_and_processor(config.model)
     model = apply_lora(model, config.lora)
+
+    # Apply forward modifications (VLA architecture changes)
+    if config.forward_mod.enabled:
+        from .forward_mods import apply_forward_mods
+
+        model, applied_mods = apply_forward_mods(model, config.forward_mod)
+
+        # Collect extra parameters from forward mods
+        extra_params = []
+        for mod in applied_mods:
+            extra_params.extend(mod.extra_parameters())
+        if extra_params:
+            logger.info(
+                "Forward mods added %d extra trainable parameters",
+                sum(p.numel() for p in extra_params),
+            )
+            # Store on model for the trainer to access
+            model._forward_mod_params = extra_params
+
     return model, processor

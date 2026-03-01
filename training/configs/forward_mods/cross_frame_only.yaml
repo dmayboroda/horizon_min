@@ -1,0 +1,10 @@
+# Text mode + cross-frame attention
+forward_mod:
+  enabled: true
+  mode: "text"
+  cross_frame_attention: true
+  cross_frame_layers: [0, 1, 2, 3]
+  num_frames: 4
+
+logging:
+  wandb_run_name: "ministral-crossframe"

@@ -1,0 +1,9 @@
+# Text mode + temporal position encoding
+forward_mod:
+  enabled: true
+  mode: "text"
+  temporal_position: true
+  num_frames: 4
+
+logging:
+  wandb_run_name: "ministral-temporal"

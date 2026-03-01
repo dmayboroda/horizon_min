@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -54,6 +54,7 @@ class ModelConfig:
     attn_implementation: str = "sdpa"
     trust_remote_code: bool = True
     device_map: str = "auto"
+    quantize_4bit: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +172,9 @@ class RewardConfig:
     # Accuracy reward (did model parse / predict correctly)
     accuracy_weight: float = 1.0
 
+    # Distance-based shaping (action mode only)
+    distance_reward_weight: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -200,6 +204,60 @@ class HubConfig:
 
 
 # ---------------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------------
+@dataclass
+class OptimizerConfig:
+    """Optimizer selection and parameters."""
+
+    name: str = "adamw"  # adamw | adamw_8bit | muon | soap | shampoo | prodigy
+    # AdamW / AdamW-8bit
+    betas: tuple[float, float] = (0.9, 0.999)
+    eps: float = 1e-8
+    # Muon
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    # SOAP
+    soap_shampoo_beta: float = 0.95
+    soap_precondition_frequency: int = 10
+    # Shampoo
+    shampoo_update_freq: int = 10
+    # Prodigy
+    prodigy_d_coef: float = 1.0
+    prodigy_growth_rate: float = float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Forward Mods
+# ---------------------------------------------------------------------------
+@dataclass
+class ForwardModConfig:
+    """Architecture modification settings (VLA mode)."""
+
+    enabled: bool = False
+    mode: Literal["text", "action"] = "text"
+
+    # Temporal position encoding
+    temporal_position: bool = False
+    num_frames: int = 4
+
+    # Cross-frame attention
+    cross_frame_attention: bool = False
+    cross_frame_layers: list[int] = field(default_factory=lambda: [0, 1, 2, 3])
+
+    # Spatial decoder (replaces last N LM layers + LM head)
+    spatial_decoder: bool = False
+    decoder_start_layer: int = 30  # keep layers 0..29, replace 30..33
+    action_dim: int = 3  # x, y, horizon
+    action_hidden_dim: int = 256
+
+    # Gaussian policy head
+    log_std_init: float = -1.0
+    log_std_min: float = -5.0
+    log_std_max: float = 2.0
+
+
+# ---------------------------------------------------------------------------
 # Full config
 # ---------------------------------------------------------------------------
 @dataclass
@@ -214,6 +272,8 @@ class FullConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     hub: HubConfig = field(default_factory=HubConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    forward_mod: ForwardModConfig = field(default_factory=ForwardModConfig)
 
     # ------------------------------------------------------------------
     # YAML loading
@@ -273,6 +333,10 @@ class FullConfig:
         ):
             env_raw["frame_output_size"] = tuple(env_raw["frame_output_size"])
 
+        opt_raw = raw.get("optimizer", {})
+        if "betas" in opt_raw and isinstance(opt_raw["betas"], list):
+            opt_raw["betas"] = tuple(opt_raw["betas"])
+
         return cls(
             environment=EnvironmentConfig(**env_raw),
             model=ModelConfig(**raw.get("model", {})),
@@ -282,6 +346,8 @@ class FullConfig:
             reward=RewardConfig(**raw.get("reward", {})),
             logging=LoggingConfig(**raw.get("logging", {})),
             hub=HubConfig(**raw.get("hub", {})),
+            optimizer=OptimizerConfig(**opt_raw),
+            forward_mod=ForwardModConfig(**raw.get("forward_mod", {})),
         )
 
 
@@ -309,4 +375,6 @@ def _config_to_dict(cfg: FullConfig) -> dict[str, Any]:
         raw["environment"]["frame_output_size"] = list(
             raw["environment"]["frame_output_size"]
         )
+    if "optimizer" in raw and "betas" in raw["optimizer"]:
+        raw["optimizer"]["betas"] = list(raw["optimizer"]["betas"])
     return raw

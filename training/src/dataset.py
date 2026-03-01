@@ -160,7 +160,17 @@ def simulate_shot(
     hit_a = duck_a.check_hit(pixel_x, pixel_y)
     hit_b = duck_b.check_hit(pixel_x, pixel_y)
 
-    return {"hit_a": hit_a, "hit_b": hit_b, "had_target": had_target}
+    # Include normalised duck positions for distance-based reward shaping
+    duck_a_pos = (duck_a.x / SCREEN_WIDTH, duck_a.y / SCREEN_HEIGHT)
+    duck_b_pos = (duck_b.x / SCREEN_WIDTH, duck_b.y / SCREEN_HEIGHT)
+
+    return {
+        "hit_a": hit_a,
+        "hit_b": hit_b,
+        "had_target": had_target,
+        "duck_a_pos": duck_a_pos,
+        "duck_b_pos": duck_b_pos,
+    }
 
 
 # ===================================================================

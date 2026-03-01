@@ -24,19 +24,22 @@ model:
 
 lora:
   enabled: true
-  r: 16
-  lora_alpha: 32
+  r: 32
+  lora_alpha: 64
   lora_dropout: 0.05
   target_modules:
     - q_proj
     - k_proj
     - v_proj
     - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
   task_type: "CAUSAL_LM"
   bias: "none"
 
 grpo:
-  num_generations: 4
+  num_generations: 8
   max_completion_length: 256
   temperature: 0.7
   top_p: 0.95
@@ -80,6 +83,7 @@ reward:
   bonus_perfect_round: 2.0
   format_weight: 0.3
   accuracy_weight: 1.0
+  distance_reward_weight: 0.0
 
 logging:
   wandb_project: "duckhunt-grpo"
@@ -93,3 +97,30 @@ hub:
   push_to_hub: false
   hub_model_id: null  # e.g. "username/duckhunt-grpo"
   hub_private: true
+
+optimizer:
+  name: "adamw"
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  muon_momentum: 0.95
+  muon_nesterov: true
+  soap_shampoo_beta: 0.95
+  soap_precondition_frequency: 10
+  shampoo_update_freq: 10
+  prodigy_d_coef: 1.0
+  prodigy_growth_rate: .inf
+
+forward_mod:
+  enabled: false
+  mode: "text"
+  temporal_position: false
+  num_frames: 4
+  cross_frame_attention: false
+  cross_frame_layers: [0, 1, 2, 3]
+  spatial_decoder: false
+  decoder_start_layer: 30
+  action_dim: 3
+  action_hidden_dim: 256
+  log_std_init: -1.0
+  log_std_min: -5.0
+  log_std_max: 2.0

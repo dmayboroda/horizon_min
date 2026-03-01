@@ -1,0 +1,8 @@
+# AdamW optimizer (default baseline)
+optimizer:
+  name: "adamw"
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+logging:
+  wandb_run_name: "ministral-adamw"

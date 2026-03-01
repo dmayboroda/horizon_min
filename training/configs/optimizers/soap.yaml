@@ -1,0 +1,9 @@
+# SOAP optimizer — combines Adam with Shampoo-style preconditioning
+optimizer:
+  name: "soap"
+  betas: [0.9, 0.999]
+  soap_shampoo_beta: 0.95
+  soap_precondition_frequency: 10
+
+logging:
+  wandb_run_name: "ministral-soap"

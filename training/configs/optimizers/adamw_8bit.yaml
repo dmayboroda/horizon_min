@@ -1,0 +1,8 @@
+# AdamW 8-bit optimizer (bitsandbytes) — saves optimizer VRAM
+optimizer:
+  name: "adamw_8bit"
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+logging:
+  wandb_run_name: "ministral-adamw-8bit"
