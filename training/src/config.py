@@ -101,6 +101,9 @@ class GRPOConfig:
     loss_type: str = "grpo"
     scale_rewards: str = "group"
 
+    # Entropy bonus (prevents mode collapse)
+    entropy_coeff: float = 0.01  # weight for entropy bonus in loss
+
     # vLLM (disabled by default for small-scale)
     use_vllm: bool = False
 

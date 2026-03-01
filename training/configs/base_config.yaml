@@ -46,6 +46,7 @@ grpo:
   epsilon: 0.2
   loss_type: "grpo"
   scale_rewards: "group"
+  entropy_coeff: 0.01
   use_vllm: false
 
 training:

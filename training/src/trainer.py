@@ -391,6 +391,7 @@ class DuckHuntGRPOTrainer:
 
         total_loss = torch.tensor(0.0, device=self.device)
         total_kl = 0.0
+        total_entropy = 0.0
         total_clip = 0
 
         for i in range(G):
@@ -411,6 +412,12 @@ class DuckHuntGRPOTrainer:
             comp_labels = full_ids[:, prompt_len:]
 
             log_probs = _log_probs_from_logits(logits, comp_labels)  # (1, comp_len)
+
+            # --- 2b. Token-level entropy (prevents mode collapse) ---
+            probs = F.softmax(logits, dim=-1)
+            log_probs_full = F.log_softmax(logits, dim=-1)
+            entropy = -(probs * log_probs_full).sum(dim=-1).mean()  # scalar
+            total_entropy += entropy.item()
 
             # --- 3. Reference log-probs ---
             if self.ref_model is not None:
@@ -437,7 +444,8 @@ class DuckHuntGRPOTrainer:
             kl = (log_probs - ref_log_probs).mean()
             total_kl += kl.item()
 
-            loss_i = policy_loss + grpo.beta * kl
+            # --- 6. Entropy bonus (subtract to maximize entropy) ---
+            loss_i = policy_loss + grpo.beta * kl - grpo.entropy_coeff * entropy
             total_loss = total_loss + loss_i
 
         total_loss = total_loss / max(G, 1)
@@ -447,6 +455,7 @@ class DuckHuntGRPOTrainer:
             "mean_reward": mean_r.item(),
             "std_reward": std_r.item(),
             "mean_kl": total_kl / max(G, 1),
+            "mean_entropy": total_entropy / max(G, 1),
             "advantages_mean": advantages.mean().item(),
         }
 
@@ -522,11 +531,13 @@ class DuckHuntGRPOTrainer:
         lr = self.scheduler.get_last_lr()[0]
         grad_norm = metrics.get("gradient_norm", 0.0)
         hit_rate = metrics.get("hit_rate", 0.0)
+        entropy = metrics.get("mean_entropy", 0.0)
         msg = (
             f"step={step + 1}  "
             f"loss={metrics.get('loss', 0):.4f}  "
             f"reward={metrics.get('mean_reward', 0):.3f} +/- {metrics.get('std_reward', 0):.3f}  "
             f"hits={metrics.get('total_hits', 0)}/{metrics.get('total_shots', 0)} ({hit_rate:.1%})  "
+            f"entropy={entropy:.2f}  "
             f"grad={grad_norm:.4f}  "
             f"lr={lr:.2e}"
         )
@@ -541,6 +552,7 @@ class DuckHuntGRPOTrainer:
                 "train/advantages_mean": metrics.get("advantages_mean", 0),
                 "train/gradient_norm": grad_norm,
                 "train/hit_rate": hit_rate,
+                "train/mean_entropy": entropy,
                 "train/total_hits": metrics.get("total_hits", 0),
                 "train/step": step + 1,
             }
