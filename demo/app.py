@@ -29,7 +29,14 @@ from game_config import (
     FRAMES_PER_OBSERVATION,
     FPS,
 )
-from inference import Action
+from dataclasses import dataclass
+
+
+@dataclass
+class Action:
+    x: float
+    y: float
+    horizon: int
 
 logging.basicConfig(
     level=logging.INFO,
