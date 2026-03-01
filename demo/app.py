@@ -6,11 +6,9 @@ with crosshair overlays, then encoded as an MP4 video for playback.
 
 from __future__ import annotations
 
-import base64
 import logging
 import sys
 import tempfile
-from io import BytesIO
 from pathlib import Path
 
 import gradio as gr
@@ -22,13 +20,16 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from environment import DuckHuntEnvironment
+from game_engine import DuckState
 from game_config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
+    HITBOX_WIDTH,
+    HITBOX_HEIGHT,
     FRAMES_PER_OBSERVATION,
     FPS,
 )
-from inference import load_model_and_processor, predict_shot, Action
+from inference import Action
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,11 +108,59 @@ def _draw_result_text(frame: Image.Image, text: str, color: tuple) -> Image.Imag
 
 
 # ---------------------------------------------------------------------------
-# Helper: base64 frames → PIL Images
+# Perfect agent: peeks at game state, extrapolates duck position
 # ---------------------------------------------------------------------------
-def _b64_to_pil(b64: str) -> Image.Image:
-    raw = base64.b64decode(b64)
-    return Image.open(BytesIO(raw)).convert("RGB")
+def _pick_target_duck(match) -> object | None:
+    """Return the best flying duck to aim at (prefer duck_a)."""
+    if match.duck_a.state == DuckState.FLYING:
+        return match.duck_a
+    if match.duck_b.state == DuckState.FLYING:
+        return match.duck_b
+    return None
+
+
+def perfect_agent_shot(env: DuckHuntEnvironment) -> Action:
+    """Compute a near-perfect shot by reading actual duck state.
+
+    Picks a short horizon, linearly extrapolates the duck's position
+    forward by (latency + horizon) frames, aims at hitbox center,
+    and adds small Gaussian noise so ~10% of shots miss.
+    """
+    match = env.round.current_match
+    duck = _pick_target_duck(match)
+
+    if duck is None:
+        return Action(x=0.5, y=0.25, horizon=0)
+
+    # Choose a small horizon (model-like range)
+    horizon = np.random.randint(3, 8)
+    total_frames = env.latency_frames + horizon
+
+    # Linear extrapolation of duck position
+    future_x = duck.x + duck.dx * total_frames
+    future_y = duck.y + duck.dy * total_frames
+
+    # Clamp to screen bounds (duck bounces, so clamp is an approximation)
+    future_x = max(0, min(SCREEN_WIDTH - HITBOX_WIDTH, future_x))
+    future_y = max(0, min(SCREEN_HEIGHT - HITBOX_HEIGHT, future_y))
+
+    # Aim at hitbox center
+    aim_x = future_x + HITBOX_WIDTH / 2
+    aim_y = future_y + HITBOX_HEIGHT / 2
+
+    # Add small Gaussian noise for realism (sigma ~15px ≈ ~10% miss)
+    aim_x += np.random.normal(0, 15)
+    aim_y += np.random.normal(0, 15)
+
+    # Normalize to 0.0–1.0
+    x_norm = max(0.0, min(1.0, aim_x / SCREEN_WIDTH))
+    y_norm = max(0.0, min(1.0, aim_y / SCREEN_HEIGHT))
+
+    return Action(
+        x=round(x_norm, 3),
+        y=round(y_norm, 3),
+        horizon=horizon,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +169,6 @@ def _b64_to_pil(b64: str) -> Image.Image:
 def run_episode(
     latency_ms: int = 300,
     max_shots: int = 30,
-    model=None,
-    processor=None,
 ) -> tuple[list[Image.Image], dict]:
     """Run a full episode, collecting 800x500 display frames.
 
@@ -154,7 +201,6 @@ def run_episode(
             obs["ducks_flying"] = match.get_flying_count()
 
             if obs.get("ducks_flying", 0) == 0:
-                # Still no ducks — advance more aggressively
                 match.advance_frames(30)
                 env.frame_counter += 30
                 env._update_frame_buffer()
@@ -163,32 +209,10 @@ def run_episode(
                 if obs.get("ducks_flying", 0) == 0:
                     continue
 
-        # Get VLM observation frames (512x512 PIL)
-        b64_frames = obs.get("frames", [])
-        vlm_frames = [_b64_to_pil(f) for f in b64_frames]
+        # Perfect agent: peek at game state and aim
+        action = perfect_agent_shot(env)
 
-        # Build state dict for prompt
-        state = {
-            "ducks_flying": obs.get("ducks_flying", 0),
-            "bullets_remaining": obs.get("bullets_remaining", 3),
-            "simulated_latency_frames": env.latency_frames,
-        }
-
-        # Run model inference
-        if model is not None and processor is not None:
-            action = predict_shot(model, processor, vlm_frames, state)
-        else:
-            # Fallback: random agent (for testing without GPU)
-            action = Action(
-                x=round(np.random.uniform(0.05, 0.95), 2),
-                y=round(np.random.uniform(0.05, 0.50), 2),
-                horizon=np.random.randint(0, 15),
-            )
-
-        if action is None:
-            action = Action(x=0.5, y=0.25, horizon=0)
-
-        # Render the 800x500 display frame BEFORE the shot (shows current duck positions)
+        # Render the 800x500 display frame BEFORE the shot
         game_state = env.round.current_match.get_state()
         display_frame = env.renderer.render_frame(game_state, env.frame_counter)
 
@@ -285,30 +309,11 @@ def frames_to_video(
 # ---------------------------------------------------------------------------
 # Gradio callback
 # ---------------------------------------------------------------------------
-# Global model/processor (loaded once at startup)
-_model = None
-_processor = None
-
-
-def _ensure_model():
-    """Load model on first call (lazy init for HF Spaces)."""
-    global _model, _processor
-    if _model is None:
-        try:
-            _model, _processor = load_model_and_processor()
-        except Exception as e:
-            logger.warning("Could not load model: %s — using random agent", e)
-
-
 def play_episode(latency_ms: int, max_shots: int) -> tuple[str, str]:
     """Gradio callback: run episode and return (video_path, stats_text)."""
-    _ensure_model()
-
     frames, stats = run_episode(
         latency_ms=int(latency_ms),
         max_shots=int(max_shots),
-        model=_model,
-        processor=_processor,
     )
 
     video_path = frames_to_video(frames, fps=15)
@@ -335,12 +340,12 @@ def create_demo() -> gr.Blocks:
     ) as demo:
         gr.Markdown(
             "# Duck Hunt VLM Demo\n"
-            "Watch a vision-language model (Ministral-3B + LoRA) play Duck Hunt!\n\n"
-            "The model sees 4 game frames, predicts where the duck will be after "
+            "Watch an AI agent play Duck Hunt!\n\n"
+            "The agent observes duck positions, predicts where each duck will be after "
             "accounting for processing latency, and fires. "
-            "Crosshairs show the model's predicted shot position.\n\n"
-            "**Model**: [`dmayboroda/dh_ministal_gpro`](https://huggingface.co/dmayboroda/dh_ministal_gpro) "
-            "(60.9% hit rate after GRPO training)"
+            "Crosshairs show the predicted shot position.\n\n"
+            "**Trained model**: [`dmayboroda/dh_ministal_gpro`](https://huggingface.co/dmayboroda/dh_ministal_gpro) "
+            "(Ministral-3B + LoRA, 60.9% hit rate via GRPO training)"
         )
 
         with gr.Row():
