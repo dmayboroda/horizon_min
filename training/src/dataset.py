@@ -259,11 +259,19 @@ class DuckHuntPromptGenerator:
         Returns
         -------
         datasets.Dataset
-            Columns: ``prompt`` (str, JSON-encoded messages),
-            ``images`` (list[Image]), ``snapshot`` (str).
+            Columns: ``prompt`` (list[dict] — multimodal messages with
+            PIL images), ``snapshot`` (str — JSON).
+
+        Notes
+        -----
+        PIL images are embedded directly in the ``prompt`` messages.
+        Because Arrow cannot serialise PIL objects, the dataset is built
+        with only the string ``snapshot`` column going through Arrow;
+        the ``prompt`` column is injected afterwards via
+        ``Dataset.from_dict`` on a snapshot-only dataset, then merged
+        in-memory.
         """
-        prompts: list[str] = []
-        all_images: list[list[bytes]] = []
+        prompts: list[list[dict]] = []
         snapshots: list[str] = []
 
         obs = self.env.reset()
@@ -287,21 +295,13 @@ class DuckHuntPromptGenerator:
                 frames = self.env.get_frames()
                 state = self.env.get_state()
 
-            # Build prompt with image placeholders (no PIL objects)
+            # Build prompt — messages contain PIL images inline
             messages, _tools = build_prompt(frames, state)
-
-            # Strip PIL objects from messages for serialisation —
-            # replace {"type": "image", "image": <PIL>} with {"type": "image"}
-            serialisable_messages = _strip_pil_from_messages(messages)
 
             # Snapshot for deterministic reward
             snap = capture_snapshot(self.env)
 
-            # Convert PIL frames to PNG bytes for Arrow storage
-            frame_bytes = [_pil_to_bytes(f) for f in frames]
-
-            prompts.append(json.dumps(serialisable_messages))
-            all_images.append(frame_bytes)
+            prompts.append(messages)
             snapshots.append(json.dumps(snap))
 
             # Advance environment to create diverse states
@@ -313,18 +313,12 @@ class DuckHuntPromptGenerator:
 
         logger.info("Dataset generation complete: %d samples", num_samples)
 
-        return Dataset.from_dict(
-            {
-                "prompt": prompts,
-                "images": all_images,
-                "snapshot": snapshots,
-            },
-            features=Features({
-                "prompt": Value("string"),
-                "images": Sequence(DatasetImage()),
-                "snapshot": Value("string"),
-            }),
-        )
+        # Build Arrow dataset with only serialisable columns, then
+        # attach the prompt list in-memory so PIL images never touch Arrow.
+        ds = Dataset.from_dict({"snapshot": snapshots})
+        # Add prompt column as a plain Python list (bypass Arrow)
+        ds = ds.add_column("prompt", prompts)  # type: ignore[arg-type]
+        return ds
 
 
 # ===================================================================

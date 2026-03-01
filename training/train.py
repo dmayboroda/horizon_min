@@ -96,13 +96,6 @@ def train_trl(cfg: FullConfig, num_samples: int) -> None:
     dataset = generator.generate(num_samples)
     logger.info("Dataset ready: %d rows", len(dataset))
 
-    # Reconstruct multimodal prompts: inject PIL images back into messages
-    dataset = dataset.map(
-        reconstruct_prompt,
-        remove_columns=["images"],
-        desc="Rebuilding multimodal prompts",
-    )
-
     # 2. Load model + processor
     model, processor = load_model_and_processor(cfg.model)
 
