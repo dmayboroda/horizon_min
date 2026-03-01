@@ -111,6 +111,7 @@ class DuckHuntGRPOTrainer:
         # Checkpoint tracking
         self.global_step = 0
         self.best_eval_hit_rate = -1.0
+        self._reward_baseline = 0.0  # running average for advantage when std=0
         self._saved_checkpoints: list[Path] = []
 
         # Sample outputs buffer for W&B table logging
@@ -367,9 +368,13 @@ class DuckHuntGRPOTrainer:
         mean_r = rewards_t.mean()
         std_r = rewards_t.std()
         if std_r < 1e-8:
-            advantages = torch.zeros_like(rewards_t)
+            # All rewards identical — use running baseline so the model
+            # still gets a gradient signal (REINFORCE-style).
+            advantages = rewards_t - self._reward_baseline
         else:
             advantages = (rewards_t - mean_r) / std_r
+        # Update running baseline (exponential moving average)
+        self._reward_baseline = 0.95 * self._reward_baseline + 0.05 * mean_r.item()
         advantages = advantages.to(self.device)
 
         total_loss = torch.tensor(0.0, device=self.device)

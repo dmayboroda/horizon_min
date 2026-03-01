@@ -198,6 +198,18 @@ def build_prompt(
 
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        # Few-shot example so the model knows the expected output format
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": (
+                "Frame sequence: 4 frames. Ducks flying: 2. "
+                "Latency: 6 frames. Call the shoot tool now."
+            )}],
+        },
+        {
+            "role": "assistant",
+            "content": '[TOOL_CALLS] [{"name": "shoot", "arguments": {"x": 0.45, "y": 0.25, "horizon": 8}, "id": "abc123xyz"}]',
+        },
         {"role": "user", "content": user_content},
     ]
 
