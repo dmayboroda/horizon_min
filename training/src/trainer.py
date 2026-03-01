@@ -310,12 +310,14 @@ class DuckHuntGRPOTrainer:
         # Decode and compute rewards
         completion_ids_list = []
         rewards = []
+        completions_text = []
 
         for i in range(G):
             comp_ids = output_ids[i, prompt_len:]
             completion_ids_list.append(comp_ids)
 
             decoded = self.processor.decode(comp_ids, skip_special_tokens=False)
+            completions_text.append(decoded)
             action = parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
 
             if action is not None:
@@ -326,19 +328,18 @@ class DuckHuntGRPOTrainer:
             reward = compute_reward(result, action, self.cfg.reward)
             rewards.append(reward)
 
-            # Buffer sample outputs for W&B table
-            self._sample_outputs.append({
-                "step": self.global_step,
-                "generation_idx": i,
-                "output": decoded[:500],
-                "action": f"x={action.x:.3f}, y={action.y:.3f}, h={action.horizon}" if action else "INVALID",
-                "reward": reward,
-                "hit": bool(result.get("hit_a") or result.get("hit_b")) if action else False,
-            })
-            # Keep buffer bounded
-            max_samples = self.cfg.logging.num_completions_to_print * 20
-            if len(self._sample_outputs) > max_samples:
-                self._sample_outputs = self._sample_outputs[-max_samples:]
+            # Log full completion to console
+            action_str = f"x={action.x:.3f}, y={action.y:.3f}, h={action.horizon}" if action else "INVALID"
+            hit_str = ""
+            if action:
+                hit_str = f" hit_a={result['hit_a']} hit_b={result['hit_b']}"
+            logger.info(
+                "  [gen %d] reward=%.2f action=%s%s\n    output: %s",
+                i, reward, action_str, hit_str, decoded,
+            )
+
+        # Log frames and completions to W&B
+        self._log_batch_to_wandb(frames, completions_text, rewards)
 
         # Advance the real environment
         self.env.advance_frames(10)
@@ -473,6 +474,33 @@ class DuckHuntGRPOTrainer:
     # ------------------------------------------------------------------
     #  Logging
     # ------------------------------------------------------------------
+    def _log_batch_to_wandb(
+        self,
+        frames: list,
+        completions: list[str],
+        rewards: list[float],
+    ) -> None:
+        """Log observation frames and full completions to W&B."""
+        if not self._wandb_active or wandb.run is None:
+            return
+
+        log_dict: dict = {}
+
+        # Log observation frames as images
+        wandb_images = []
+        for i, frame in enumerate(frames):
+            wandb_images.append(wandb.Image(frame, caption=f"frame_{i}"))
+        if wandb_images:
+            log_dict["train/observation_frames"] = wandb_images
+
+        # Log completions as a table
+        comp_table = wandb.Table(columns=["gen_idx", "completion", "reward"])
+        for i, (text, reward) in enumerate(zip(completions, rewards)):
+            comp_table.add_data(i, text, reward)
+        log_dict["train/completions"] = comp_table
+
+        wandb.log(log_dict, step=self.global_step)
+
     def _log_metrics(self, step: int, metrics: dict) -> None:
         lr = self.scheduler.get_last_lr()[0]
         grad_norm = metrics.get("gradient_norm", 0.0)
