@@ -84,6 +84,15 @@ cd training
 
 See [training/README.md](training/README.md) for full training documentation.
 
+### Publishing to Hugging Face Hub
+
+```bash
+cd training
+
+# Push after training
+./run_training.sh --push-to-hub --hub-model-id username/duckhunt-ministral-grpo
+```
+
 ### Evaluating a Checkpoint
 
 ```bash

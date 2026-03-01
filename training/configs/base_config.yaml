@@ -88,3 +88,8 @@ logging:
   report_to: "wandb"
   log_completions: true
   num_completions_to_print: 5
+
+hub:
+  push_to_hub: false
+  hub_model_id: null  # e.g. "username/duckhunt-grpo"
+  hub_private: true

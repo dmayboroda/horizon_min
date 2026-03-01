@@ -9,6 +9,7 @@ set -euo pipefail
 #    ./run_training.sh                    # TRL mode (default)
 #    ./run_training.sh --custom           # Custom GRPO loop
 #    ./run_training.sh --custom --resume outputs/ministral_duckhunt_grpo/checkpoint-500
+#    ./run_training.sh --push-to-hub --hub-model-id user/duckhunt-grpo
 #
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +23,8 @@ NUM_SAMPLES=1000
 MODE="trl"                   # "trl" or "custom"
 RESUME_FROM=""
 WANDB_PROJECT="duckhunt-grpo"
+PUSH_TO_HUB=false
+HUB_MODEL_ID=""
 EXTRA_OVERRIDES=()
 
 # -------------------------------------------------------------------
@@ -57,6 +60,14 @@ while [[ $# -gt 0 ]]; do
             EXTRA_OVERRIDES+=("--override" "logging.report_to=none")
             shift
             ;;
+        --push-to-hub)
+            PUSH_TO_HUB=true
+            shift
+            ;;
+        --hub-model-id)
+            HUB_MODEL_ID="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -68,6 +79,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --wandb-project NAME  W&B project name (default: duckhunt-grpo)"
             echo "  --override KEY=VAL    Override config value (repeatable)"
             echo "  --no-wandb            Disable W&B logging"
+            echo "  --push-to-hub         Push final model to Hugging Face Hub"
+            echo "  --hub-model-id ID     HF repo id (e.g. user/duckhunt-grpo)"
             echo "  -h, --help            Show this help"
             exit 0
             ;;
@@ -118,6 +131,9 @@ fi
 if [ -n "$RESUME_FROM" ]; then
     echo "  Resume from: $RESUME_FROM"
 fi
+if [ "$PUSH_TO_HUB" = true ]; then
+    echo "  Push to Hub: $HUB_MODEL_ID"
+fi
 echo "============================================================"
 echo ""
 
@@ -130,6 +146,14 @@ if [ "$MODE" = "custom" ]; then
     fi
 else
     CMD+=(--num-samples "$NUM_SAMPLES")
+fi
+
+# HF Hub
+if [ "$PUSH_TO_HUB" = true ]; then
+    CMD+=(--push-to-hub)
+    if [ -n "$HUB_MODEL_ID" ]; then
+        CMD+=(--hub-model-id "$HUB_MODEL_ID")
+    fi
 fi
 
 # Append any extra overrides

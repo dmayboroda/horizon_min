@@ -217,6 +217,39 @@ When `report_to: wandb` is set (default):
 
 Disable with `--no-wandb` or `--override logging.report_to=none`.
 
+## Pushing to Hugging Face Hub
+
+Upload trained checkpoints to HF Hub after training:
+
+```bash
+# Via CLI flags
+./run_training.sh --push-to-hub --hub-model-id username/duckhunt-ministral-grpo
+
+# Via config override
+python train.py --config configs/ministral_config.yaml \
+    --override hub.push_to_hub=true \
+    --override hub.hub_model_id=username/duckhunt-ministral-grpo
+```
+
+Or set it in your YAML config:
+
+```yaml
+hub:
+  push_to_hub: true
+  hub_model_id: "username/duckhunt-ministral-grpo"
+  hub_private: true  # default
+```
+
+What gets uploaded:
+- LoRA adapter weights (`adapter_model.safetensors`, `adapter_config.json`)
+- Processor/tokenizer files
+- Auto-generated model card with training details
+- Optimizer and scheduler states are excluded to keep the repo lightweight
+
+The best checkpoint (by eval hit_rate) is uploaded by default. If no evaluation was run, the latest checkpoint is used instead.
+
+Requires authentication: `huggingface-cli login` before training.
+
 ## Evaluation
 
 ```bash

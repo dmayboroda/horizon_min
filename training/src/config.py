@@ -188,6 +188,18 @@ class LoggingConfig:
 
 
 # ---------------------------------------------------------------------------
+# Hub
+# ---------------------------------------------------------------------------
+@dataclass
+class HubConfig:
+    """Hugging Face Hub upload settings."""
+
+    push_to_hub: bool = False
+    hub_model_id: str | None = None  # e.g. "username/duckhunt-ministral-grpo"
+    hub_private: bool = True
+
+
+# ---------------------------------------------------------------------------
 # Full config
 # ---------------------------------------------------------------------------
 @dataclass
@@ -201,6 +213,7 @@ class FullConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    hub: HubConfig = field(default_factory=HubConfig)
 
     # ------------------------------------------------------------------
     # YAML loading
@@ -268,6 +281,7 @@ class FullConfig:
             training=TrainingConfig(**raw.get("training", {})),
             reward=RewardConfig(**raw.get("reward", {})),
             logging=LoggingConfig(**raw.get("logging", {})),
+            hub=HubConfig(**raw.get("hub", {})),
         )
 
 

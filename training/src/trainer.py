@@ -245,6 +245,10 @@ class DuckHuntGRPOTrainer:
         self._save_checkpoint(total_steps - 1, {})
         logger.info("Training complete after %d steps.", total_steps)
 
+        # Push to HF Hub
+        if cfg.hub.push_to_hub:
+            self.push_to_hub()
+
     # ------------------------------------------------------------------
     #  Collect batch
     # ------------------------------------------------------------------
@@ -688,3 +692,107 @@ class DuckHuntGRPOTrainer:
             )
 
         return resume_step
+
+    # ------------------------------------------------------------------
+    #  Hugging Face Hub upload
+    # ------------------------------------------------------------------
+    def push_to_hub(self, checkpoint_dir: str | None = None) -> None:
+        """Push model checkpoint to Hugging Face Hub.
+
+        Parameters
+        ----------
+        checkpoint_dir : str, optional
+            Path to the checkpoint to upload.  Defaults to
+            ``best_checkpoint`` if it exists, otherwise the latest
+            checkpoint in the output directory.
+        """
+        from huggingface_hub import HfApi, ModelCard, ModelCardData
+
+        hub = self.cfg.hub
+        repo_id = hub.hub_model_id
+        if not repo_id:
+            logger.warning("hub.hub_model_id is not set — skipping push_to_hub.")
+            return
+
+        # Resolve which checkpoint to upload
+        if checkpoint_dir is not None:
+            upload_dir = Path(checkpoint_dir)
+        else:
+            best = Path(self.cfg.training.output_dir) / "best_checkpoint"
+            if best.exists():
+                upload_dir = best
+            else:
+                # Fall back to latest checkpoint-N/
+                out = Path(self.cfg.training.output_dir)
+                ckpts = sorted(out.glob("checkpoint-*"), key=lambda p: p.stat().st_mtime)
+                if not ckpts:
+                    logger.warning("No checkpoints found to push.")
+                    return
+                upload_dir = ckpts[-1]
+
+        logger.info("Pushing %s to HF Hub: %s …", upload_dir, repo_id)
+
+        api = HfApi()
+
+        # Create repo if it doesn't exist
+        api.create_repo(repo_id, private=hub.hub_private, exist_ok=True)
+
+        # Upload adapter files
+        api.upload_folder(
+            folder_path=str(upload_dir),
+            repo_id=repo_id,
+            ignore_patterns=["optimizer.pt", "scheduler.pt"],
+        )
+
+        # Create a model card
+        trainer_state_path = upload_dir / "trainer_state.json"
+        eval_info = ""
+        if trainer_state_path.exists():
+            with open(trainer_state_path) as f:
+                state = json.load(f)
+            hit_rate = state.get("best_eval_hit_rate", state.get("eval_metrics", {}).get("core", {}).get("hit_rate"))
+            if hit_rate is not None:
+                eval_info = f"- **Best eval hit rate**: {hit_rate:.1%}\n"
+
+        card_content = f"""\
+---
+library_name: peft
+base_model: {self.cfg.model.model_name}
+tags:
+  - grpo
+  - reinforcement-learning
+  - duck-hunt
+  - vision-language-model
+  - tool-calling
+---
+
+# {repo_id.split('/')[-1]}
+
+LoRA adapter for [{self.cfg.model.model_name}](https://huggingface.co/{self.cfg.model.model_name}),
+fine-tuned with GRPO to play Duck Hunt.
+
+## Training
+
+- **Method**: Group Relative Policy Optimization (GRPO)
+- **LoRA rank**: {self.cfg.lora.r}, alpha: {self.cfg.lora.lora_alpha}
+- **Target modules**: {', '.join(self.cfg.lora.target_modules)}
+- **Learning rate**: {self.cfg.training.learning_rate}
+- **Generations per prompt**: {self.cfg.grpo.num_generations}
+{eval_info}
+## Usage
+
+The adapter produces Mistral native tool calls (`[TOOL_CALLS]`), compatible with
+OpenAI SDK via vLLM or TGI.
+
+```python
+from peft import AutoPeftModelForCausalLM
+from transformers import AutoProcessor
+
+model = AutoPeftModelForCausalLM.from_pretrained("{repo_id}")
+processor = AutoProcessor.from_pretrained("{repo_id}")
+```
+"""
+        card = ModelCard(card_content)
+        card.push_to_hub(repo_id)
+
+        logger.info("Pushed to https://huggingface.co/%s", repo_id)

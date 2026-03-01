@@ -181,6 +181,69 @@ def train_trl(cfg: FullConfig, num_samples: int) -> None:
     processor.save_pretrained(str(final_dir))
     logger.info("Training complete. Model saved to %s", final_dir)
 
+    # 9. Push to HF Hub
+    if cfg.hub.push_to_hub and cfg.hub.hub_model_id:
+        _push_to_hub(cfg, str(final_dir))
+
+
+# ===================================================================
+#  HF Hub upload (shared by both paths)
+# ===================================================================
+def _push_to_hub(cfg: FullConfig, checkpoint_dir: str) -> None:
+    """Push a checkpoint to Hugging Face Hub."""
+    from huggingface_hub import HfApi, ModelCard
+
+    repo_id = cfg.hub.hub_model_id
+    logger.info("Pushing %s to HF Hub: %s …", checkpoint_dir, repo_id)
+
+    api = HfApi()
+    api.create_repo(repo_id, private=cfg.hub.hub_private, exist_ok=True)
+
+    api.upload_folder(
+        folder_path=checkpoint_dir,
+        repo_id=repo_id,
+        ignore_patterns=["optimizer.pt", "scheduler.pt"],
+    )
+
+    card_content = f"""\
+---
+library_name: peft
+base_model: {cfg.model.model_name}
+tags:
+  - grpo
+  - reinforcement-learning
+  - duck-hunt
+  - vision-language-model
+  - tool-calling
+---
+
+# {repo_id.split('/')[-1]}
+
+LoRA adapter for [{cfg.model.model_name}](https://huggingface.co/{cfg.model.model_name}),
+fine-tuned with GRPO to play Duck Hunt.
+
+## Training
+
+- **Method**: Group Relative Policy Optimization (GRPO)
+- **LoRA rank**: {cfg.lora.r}, alpha: {cfg.lora.lora_alpha}
+- **Target modules**: {', '.join(cfg.lora.target_modules)}
+- **Learning rate**: {cfg.training.learning_rate}
+
+## Usage
+
+```python
+from peft import AutoPeftModelForCausalLM
+from transformers import AutoProcessor
+
+model = AutoPeftModelForCausalLM.from_pretrained("{repo_id}")
+processor = AutoProcessor.from_pretrained("{repo_id}")
+```
+"""
+    card = ModelCard(card_content)
+    card.push_to_hub(repo_id)
+
+    logger.info("Pushed to https://huggingface.co/%s", repo_id)
+
 
 # ===================================================================
 #  Custom GRPO loop path  (Step 7.2)
@@ -245,9 +308,27 @@ def main() -> None:
         default=None,
         help="Path to checkpoint dir to resume training from (custom mode only).",
     )
+    parser.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        help="Push final model to Hugging Face Hub after training.",
+    )
+    parser.add_argument(
+        "--hub-model-id",
+        type=str,
+        default=None,
+        help="HF Hub repo id, e.g. 'username/duckhunt-ministral-grpo'.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args)
+
+    # Apply HF Hub CLI overrides
+    if args.push_to_hub:
+        cfg.hub.push_to_hub = True
+    if args.hub_model_id:
+        cfg.hub.hub_model_id = args.hub_model_id
+
     logger.info("Config loaded: model=%s", cfg.model.model_name)
 
     if args.custom:
