@@ -52,6 +52,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Clone and install
 cd horizon_min
 uv sync
+
+# With training dependencies
+uv sync --extra training
 ```
 
 ### Running the Server

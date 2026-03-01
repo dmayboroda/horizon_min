@@ -95,18 +95,10 @@ done
 #  Environment setup
 # -------------------------------------------------------------------
 
-# Create virtualenv if it doesn't exist
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-fi
-
-# Activate
-source venv/bin/activate
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install -q -r requirements.txt
+# Install dependencies via uv from root pyproject.toml
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+echo "Syncing dependencies (uv sync --extra training) …"
+uv sync --project "$PROJECT_ROOT" --extra training
 
 # W&B
 export WANDB_PROJECT="$WANDB_PROJECT"
@@ -137,7 +129,7 @@ fi
 echo "============================================================"
 echo ""
 
-CMD=(python train.py --config "$CONFIG")
+CMD=(uv run --project "$PROJECT_ROOT" python train.py --config "$CONFIG")
 
 if [ "$MODE" = "custom" ]; then
     CMD+=(--custom)

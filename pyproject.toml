@@ -29,6 +29,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+training = [
+    "torch>=2.4.0",
+    "transformers>=4.45.0",
+    "trl>=0.15.0",
+    "peft>=0.13.0",
+    "accelerate>=1.0.0",
+    "datasets>=3.0.0",
+    "bitsandbytes>=0.44.0",
+    "flash-attn>=2.6.0",
+    "pyyaml>=6.0",
+    "wandb>=0.18.0",
+    "huggingface_hub>=0.25.0",
+]
 experiments = [
     "weave>=0.51.0",
     "openai>=1.0.0",

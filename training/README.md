@@ -43,13 +43,15 @@ cd training
 
 - Python 3.10+
 - CUDA GPU with 24GB+ VRAM (BF16) or 12GB+ (quantised)
+- [uv](https://docs.astral.sh/uv/) for dependency management
 - The Duck Hunt OpenEnv game engine (included in this repo)
 
 ```bash
-pip install -r requirements.txt
+# From the project root
+uv sync --extra training
 ```
 
-Key dependencies: `torch>=2.4`, `transformers>=4.45`, `trl>=0.15`, `peft>=0.13`, `flash-attn>=2.6`, `wandb>=0.18`.
+Key dependencies: `torch>=2.4`, `transformers>=4.45`, `trl>=0.15`, `peft>=0.13`, `flash-attn>=2.6`, `wandb>=0.18`, `huggingface_hub>=0.25`.
 
 ## Project Structure
 
@@ -58,7 +60,6 @@ training/
 ├── run_training.sh              # Launch script
 ├── train.py                     # Main entry point (TRL + custom modes)
 ├── evaluate.py                  # Evaluation with baselines
-├── requirements.txt
 ├── configs/
 │   ├── base_config.yaml         # Default hyperparameters
 │   └── ministral_config.yaml    # Ministral-specific overrides
