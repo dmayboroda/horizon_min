@@ -208,7 +208,7 @@ def build_prompt(
         },
         {
             "role": "assistant",
-            "content": '[TOOL_CALLS] [{"name": "shoot", "arguments": {"x": 0.45, "y": 0.25, "horizon": 8}, "id": "abc123xyz"}]',
+            "content": [{"type": "text", "text": '[TOOL_CALLS] [{"name": "shoot", "arguments": {"x": 0.45, "y": 0.25, "horizon": 8}, "id": "abc123xyz"}]'}],
         },
         {"role": "user", "content": user_content},
     ]
