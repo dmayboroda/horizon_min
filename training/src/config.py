@@ -51,7 +51,7 @@ class ModelConfig:
 
     model_name: str = "mistralai/Ministral-3-8B-Instruct-2512-BF16"
     torch_dtype: str = "bfloat16"
-    attn_implementation: str = "flash_attention_2"
+    attn_implementation: str = "sdpa"
     trust_remote_code: bool = True
     device_map: str = "auto"
 

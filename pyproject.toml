@@ -37,10 +37,12 @@ training = [
     "accelerate>=1.0.0",
     "datasets>=3.0.0",
     "bitsandbytes>=0.44.0",
-    "flash-attn>=2.6.0",
     "pyyaml>=6.0",
     "wandb>=0.18.0",
     "huggingface_hub>=0.25.0",
+    # flash-attn is optional — install separately if needed:
+    #   uv pip install flash-attn --no-build-isolation
+    # Without it, set model.attn_implementation to "sdpa" or "eager"
 ]
 experiments = [
     "weave>=0.51.0",
@@ -66,10 +68,6 @@ dev-dependencies = [
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
 ]
-
-# flash-attn requires torch at build time
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch>=2.4.0"]
 
 [tool.ruff]
 target-version = "py310"
