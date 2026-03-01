@@ -113,6 +113,9 @@ class DuckHuntGRPOTrainer:
         self.best_eval_hit_rate = -1.0
         self._reward_baseline = 0.0  # running average for advantage when std=0
         self._saved_checkpoints: list[Path] = []
+        self._last_grad_norm = 0.0
+        self._total_hits = 0
+        self._total_shots = 0
 
         # Sample outputs buffer for W&B table logging
         self._sample_outputs: list[dict] = []
@@ -218,12 +221,21 @@ class DuckHuntGRPOTrainer:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), train.max_grad_norm
                 )
-                metrics["gradient_norm"] = grad_norm.item()
+                self._last_grad_norm = grad_norm.item()
 
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.global_step += 1
+
+            # Track hit rate
+            rewards = batch["rewards"]
+            self._total_shots += len(rewards)
+            self._total_hits += sum(1 for r in rewards if r > 0)
+            metrics["gradient_norm"] = self._last_grad_norm
+            metrics["hit_rate"] = self._total_hits / max(self._total_shots, 1)
+            metrics["total_hits"] = self._total_hits
+            metrics["total_shots"] = self._total_shots
 
             # 4. Logging
             if (step + 1) % train.logging_steps == 0:
@@ -509,12 +521,13 @@ class DuckHuntGRPOTrainer:
     def _log_metrics(self, step: int, metrics: dict) -> None:
         lr = self.scheduler.get_last_lr()[0]
         grad_norm = metrics.get("gradient_norm", 0.0)
+        hit_rate = metrics.get("hit_rate", 0.0)
         msg = (
             f"step={step + 1}  "
             f"loss={metrics.get('loss', 0):.4f}  "
             f"reward={metrics.get('mean_reward', 0):.3f} +/- {metrics.get('std_reward', 0):.3f}  "
-            f"kl={metrics.get('mean_kl', 0):.4f}  "
-            f"grad_norm={grad_norm:.4f}  "
+            f"hits={metrics.get('total_hits', 0)}/{metrics.get('total_shots', 0)} ({hit_rate:.1%})  "
+            f"grad={grad_norm:.4f}  "
             f"lr={lr:.2e}"
         )
         logger.info(msg)
@@ -524,14 +537,13 @@ class DuckHuntGRPOTrainer:
                 "train/loss": metrics.get("loss", 0),
                 "train/mean_reward": metrics.get("mean_reward", 0),
                 "train/std_reward": metrics.get("std_reward", 0),
-                "train/kl": metrics.get("mean_kl", 0),
                 "train/learning_rate": lr,
                 "train/advantages_mean": metrics.get("advantages_mean", 0),
+                "train/gradient_norm": grad_norm,
+                "train/hit_rate": hit_rate,
+                "train/total_hits": metrics.get("total_hits", 0),
                 "train/step": step + 1,
             }
-            # Only log gradient_norm on accumulation steps (when it's actually computed)
-            if "gradient_norm" in metrics:
-                log_dict["train/gradient_norm"] = grad_norm
             wandb.log(log_dict)
 
     def _log_eval_to_wandb(self, eval_metrics: dict, step: int) -> None:
