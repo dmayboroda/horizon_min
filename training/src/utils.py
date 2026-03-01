@@ -260,6 +260,20 @@ def parse_tool_call(
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
+    # --- attempt 1b: Ministral [TOOL_CALLS]name[ARGS]{...} format ---
+    args_match = re.search(
+        r"\[TOOL_CALLS\]\s*\w+\s*\[ARGS\]\s*(\{.*?\})", output_text, re.DOTALL
+    )
+    if args_match:
+        try:
+            args = json.loads(args_match.group(1))
+            if "x" in args and "y" in args:
+                return _build_action(
+                    args["x"], args["y"], args.get("horizon", 0), max_horizon
+                )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
     # --- attempt 2: find any JSON object with x/y keys ---
     try:
         start = output_text.index("{")
