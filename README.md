@@ -1,49 +1,66 @@
-# Horizon Min - Duck Hunt VLM Environment
+# Teaching a Vision Model to Play Duck Hunt with Reinforcement Learning
 
 ![Duck Hunt](duckhunt.webp)
 
-A headless Duck Hunt game environment designed for training and evaluating Vision Language Models (VLMs). This project provides an API-first implementation of the classic Nintendo Duck Hunt game as a research platform for AI agents, paired with a full GRPO training pipeline for fine-tuning multimodal models to play the game.
+This project fine-tunes a vision-language model to play the classic NES Duck Hunt from raw pixels. The model — [Ministral-3B](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) (8.4B LLM + 0.4B Pixtral vision encoder) — observes sequences of game frames, estimates duck velocity, predicts where ducks will be in the future, and fires by outputting tool calls: `shoot(x, y, horizon)`.
 
-## Project Structure
+**After training, the model achieved a 60.9% hit rate** — up from near-zero for the base model and well above the ~5% random baseline.
+
+> **[Live Demo](https://huggingface.co/spaces/dmayboroda/duck_hunt)** · **[Trained Model](https://huggingface.co/dmayboroda/dh_ministal_gpro)**
+
+## The Challenge
+
+Duck Hunt is deceptively hard for an AI. Ducks move fast, bounce unpredictably off screen edges, and the model must account for its own processing latency — the time between seeing frames and the shot actually landing. At 300ms latency (9 frames at 30 FPS), a duck traveling at 6 pixels/frame has moved 54 pixels by the time the bullet arrives. The model has to lead its shots.
+
+## How It Works
 
 ```
-horizon_min/
-├── duck_hunt_openenv/          # OpenEnv game environment
-│   ├── duck_hunt_env/          # Python client package
-│   ├── server/                 # FastAPI backend + game engine
-│   ├── experiments/            # VLM agent experiments (Weave)
-│   ├── tests/                  # Unit and integration tests
-│   └── assets/                 # Game sprites and backgrounds
-├── training/                   # GRPO training pipeline
-│   ├── train.py                # Main training entry point
-│   ├── evaluate.py             # Evaluation with baselines
-│   ├── run_training.sh         # Launch script
-│   ├── configs/                # YAML training configs
-│   └── src/                    # Training modules
-│       ├── config.py           # Configuration dataclasses
-│       ├── model.py            # Model loading + LoRA
-│       ├── environment.py      # Direct env wrapper (no HTTP)
-│       ├── utils.py            # Prompts, tool schema, parsing
-│       ├── reward.py           # Reward computation
-│       ├── dataset.py          # Dataset generation + snapshot system
-│       └── trainer.py          # Custom GRPO trainer
-├── duckhunt/                   # Original pygame-based game (reference)
-└── GAME_PARAMETERS.md          # Game mechanics documentation
+Game Frames (512x512) -> Pixtral Vision Encoder -> Ministral LLM -> shoot(x, y, horizon)
+                                                                          |
+                                                      Environment simulates shot -> reward
+                                                                          |
+                                                                     GRPO update
 ```
 
-## Features
+The training pipeline uses **Group Relative Policy Optimization (GRPO)** — a reinforcement learning algorithm that samples multiple shot predictions for each game state, scores them against the environment, and updates the model toward better-rewarded outputs.
 
-- **Headless Design**: No display required, pure Python API
-- **VLM-Ready**: Base64 frame encoding, OpenAI function calling support
-- **GRPO Training**: Full pipeline for fine-tuning VLMs with reinforcement learning
-- **OpenAI SDK Compatible**: Trained models serve via vLLM/TGI with standard `tools`/`tool_choice`
-- **Latency-Aware**: Simulates real-world inference latency (100-600ms) during training
-- **Experiment Tracking**: W&B integration for training metrics and Weave for experiments
-- **Configurable**: Layered YAML configs with CLI overrides
+The action space is a single function call with three parameters:
+
+| Parameter | Type | Range | Description |
+|-----------|------|-------|-------------|
+| `x` | float | 0.0–1.0 | Horizontal position (0=left, 1=right) |
+| `y` | float | 0.0–1.0 | Vertical position (0=top, 1=bottom) |
+| `horizon` | integer | 0–30 | Extra frames to wait before firing |
+
+The total prediction distance is `processing_latency_frames + horizon`. The model must learn to lead its shots based on estimated duck velocity and the combined latency.
+
+### Latency-Aware Training
+
+The model is trained across six latency buckets (100–600ms), forcing it to generalize rather than memorize a single timing. A horizon penalty (`-0.1 * horizon/30`) on successful hits encourages the model to shoot quickly when it can.
+
+### Reward Function
+
+| Outcome | Reward |
+|---------|--------|
+| Hit one duck | +1.0 |
+| Double kill | +2.5 |
+| Miss | -0.3 |
+| No target | -0.5 |
+| Invalid output | -1.0 |
+| Horizon penalty | -0.1 x (horizon / 30) on hits |
+
+Two reward signals are combined: **accuracy** (did the shot hit?) and **format** (is the output a valid tool call?).
+
+### Training Setup
+
+- **Base model**: [Ministral-3-8B-Instruct-2512-BF16](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16)
+- **Fine-tuning**: LoRA (rank 16) on attention projections — ~0.2% of parameters trainable
+- **Input**: 4 sequential 512x512 game frames + latency metadata
+- **Output**: Mistral native tool calls (`[TOOL_CALLS]`), directly servable via vLLM/TGI with the OpenAI SDK
+- **GRPO**: G=4 completions per state, clipped surrogate objective (epsilon=0.2)
+- **Deterministic replay**: Game snapshots capture duck state + RNG seeds for reproducible reward computation
 
 ## Quick Start
-
-### Environment Setup
 
 ```bash
 # Install uv if you haven't already
@@ -51,26 +68,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and install
 cd horizon_min
-uv sync
-
-# With training dependencies
 uv sync --extra training
 ```
 
-### Running the Server
-
-```bash
-# With uv
-uv run uvicorn duck_hunt_openenv.server.app:app --reload --port 8000
-
-# Or directly
-cd duck_hunt_openenv/server
-uvicorn app:app --reload --port 8000
-```
-
-API docs available at: http://localhost:8000/docs
-
-### Training a Model
+### Train
 
 ```bash
 cd training
@@ -85,84 +86,52 @@ cd training
 ./run_training.sh --no-wandb
 ```
 
-See [training/README.md](training/README.md) for full training documentation.
-
-### Publishing to Hugging Face Hub
+### Evaluate
 
 ```bash
-cd training
-
-# Push after training
-./run_training.sh --push-to-hub --hub-model-id username/duckhunt-ministral-grpo
-```
-
-### Evaluating a Checkpoint
-
-```bash
-cd training
-
 python evaluate.py --config configs/ministral_config.yaml \
     --checkpoint outputs/ministral_duckhunt_grpo/best_checkpoint \
     --baselines
 ```
 
-## Training Pipeline
+### Publish to Hugging Face Hub
 
-The training pipeline uses **Group Relative Policy Optimization (GRPO)** to fine-tune [Ministral-3-8B-Instruct-2512-BF16](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) (8.4B LLM + 0.4B Pixtral vision encoder).
-
-```
-Game Frames (512x512) -> Pixtral Vision Encoder -> Ministral LLM -> shoot(x, y, horizon)
-                                                                          |
-                                                      Environment simulates shot -> reward
-                                                                          |
-                                                                     GRPO update
+```bash
+./run_training.sh --push-to-hub --hub-model-id username/duckhunt-ministral-grpo
 ```
 
-The model observes consecutive game frames, estimates duck velocity, and predicts where ducks will be after `processing_latency + horizon` frames. It outputs Mistral native tool calls, making the trained adapter directly servable via OpenAI-compatible APIs.
+See [training/README.md](training/README.md) for full training documentation.
 
-**Key design choices:**
-- **LoRA fine-tuning** (rank 16, ~0.2% trainable params) on attention projections
-- **Dual reward**: accuracy (environment simulation) + format (valid tool call structure)
-- **Deterministic replay**: Snapshots capture duck state + RNG for reproducible reward computation
-- **Latency curriculum**: Training across 6 latency buckets (100-600ms) for robust generalization
+## Game Environment
 
-## Game Mechanics
+A headless Duck Hunt implementation with no display required — pure Python API with PIL rendering.
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Screen Size | 800 x 500 | Game viewport |
-| Frame Output | 512 x 512 | Resized for model input |
-| FPS | 30 | Frames per second |
-| Match Duration | 30s | Time limit per match |
-| Ducks per Match | 2 | Simultaneous ducks |
-| Bullets per Match | 3 | Shots available |
-| Max Misses | 4 | Game over threshold |
-| Coordinates | 0.0-1.0 | Normalised (x: left-right, y: top-bottom) |
+| Parameter | Value |
+|-----------|-------|
+| Screen | 800 x 500 px |
+| Model input | 512 x 512 px |
+| FPS | 30 |
+| Match duration | 30s |
+| Ducks per match | 2 |
+| Bullets per match | 3 |
+| Game over | 4 misses |
+| Coordinates | 0.0–1.0 normalized |
 
-### Rewards
+### Running the Server
 
-| Event | Reward |
-|-------|--------|
-| Hit | +1.0 |
-| Double Kill | +2.5 |
-| Miss | -0.3 |
-| No Target | -0.5 |
-| Invalid Output | -1.0 |
-| Horizon Penalty | -0.1 x (horizon / 30) on hits |
+```bash
+uv run uvicorn duck_hunt_openenv.server.app:app --reload --port 8000
+```
 
-## Client Usage
+### Client Usage
 
 ```python
 from duck_hunt_openenv.duck_hunt_env.client import DuckHuntEnv
 from duck_hunt_openenv.duck_hunt_env.models import ShootAction
 
-# Connect to server
 env = DuckHuntEnv.from_local(host="localhost", port=8000)
-
-# Reset environment
 obs = env.reset()
 
-# Game loop
 while not obs.done:
     action = ShootAction(x=400, y=250, horizon=5)
     obs = env.step(action)
@@ -171,67 +140,41 @@ while not obs.done:
 env.close()
 ```
 
-## VLM Agent Experiments
+## Serving the Trained Model
+
+The trained LoRA adapter produces standard Mistral tool calls, compatible with any OpenAI-SDK-compatible server:
 
 ```bash
-# Install with experiment dependencies
-uv sync --extra experiments
-
-# Configure API keys
-export OPENAI_API_KEY="your-key"
-wandb login
-
-# Single episode with GPT-4o
-uv run python -m duck_hunt_openenv.experiments.run --mode single --model gpt-4o
-
-# Batch evaluation
-uv run python -m duck_hunt_openenv.experiments.run --mode batch --episodes 10 --model gpt-4o-mini
+python -m vllm.entrypoints.openai.api_server \
+    --model mistralai/Ministral-3-8B-Instruct-2512-BF16 \
+    --enable-lora \
+    --lora-modules duckhunt=outputs/ministral_duckhunt_grpo/best_checkpoint
 ```
 
-## API Endpoints
+## Project Structure
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/reset` | POST | Reset environment |
-| `/step` | POST | Execute action |
-
-### Action Format
-
-```json
-{
-  "x": 400,
-  "y": 250,
-  "horizon": 5,
-  "confidence": "high"
-}
+```
+horizon_min/
+├── duck_hunt_openenv/          # Game environment
+│   ├── duck_hunt_env/          # Python client
+│   ├── server/                 # Game engine + PIL renderer
+│   ├── experiments/            # VLM agent experiments
+│   ├── tests/                  # Unit tests
+│   └── assets/                 # Sprites, background, font
+├── training/                   # GRPO training pipeline
+│   ├── train.py                # Training entry point
+│   ├── evaluate.py             # Evaluation with baselines
+│   ├── configs/                # YAML configs
+│   └── src/                    # Model, environment, rewards, prompts
+├── demo/                       # HuggingFace Spaces demo
+│   ├── app.py                  # Gradio UI + episode runner
+│   └── assets/                 # Game assets
+└── GAME_PARAMETERS.md          # Game mechanics reference
 ```
 
-## Running Tests
+## Why This Matters
 
-```bash
-# Unit tests
-uv run pytest duck_hunt_openenv/tests/test_game.py -v
-
-# Integration tests (random agent)
-uv run python duck_hunt_openenv/tests/test_random_agent.py --episodes 100
-```
-
-## Development
-
-```bash
-# Install with dev dependencies
-uv sync --extra dev
-
-# Run all tests
-uv run pytest
-
-# Format code
-uv run ruff format .
-
-# Lint
-uv run ruff check .
-```
+This demonstrates that small vision-language models can learn reactive, spatiotemporal reasoning from reinforcement learning alone — no human demonstrations, no reward shaping beyond hit/miss. The latency-aware design mirrors real-world deployment constraints where models must predict ahead to compensate for inference time.
 
 ## License
 
