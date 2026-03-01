@@ -224,6 +224,40 @@ def simulate_shot(
 
 
 # ===================================================================
+#  Lazy transform for set_transform (never writes back to Arrow)
+# ===================================================================
+def _multimodal_transform(batch: dict) -> dict:
+    """Lazy batch transform used by ``Dataset.set_transform``.
+
+    Decodes JSON prompt strings and injects PIL images from the
+    ``images`` column into ``{"type": "image"}`` placeholders.
+    Called at access time so PIL objects never touch Arrow.
+    """
+    new_prompts = []
+    for prompt_json, images in zip(batch["prompt"], batch["images"]):
+        messages = json.loads(prompt_json)
+        img_idx = 0
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image":
+                        if img_idx < len(images):
+                            img = images[img_idx]
+                            if not isinstance(img, Image.Image):
+                                img = Image.open(io.BytesIO(img))
+                            item["image"] = img
+                            img_idx += 1
+        new_prompts.append(messages)
+
+    return {
+        "prompt": new_prompts,
+        "images": batch["images"],
+        "snapshot": batch["snapshot"],
+    }
+
+
+# ===================================================================
 #  6.1  Prompt dataset generation
 # ===================================================================
 class DuckHuntPromptGenerator:
@@ -259,19 +293,17 @@ class DuckHuntPromptGenerator:
         Returns
         -------
         datasets.Dataset
-            Columns: ``prompt`` (list[dict] — multimodal messages with
-            PIL images), ``snapshot`` (str — JSON).
+            Columns: ``prompt`` (JSON string), ``images`` (list of PIL
+            images via HF Image feature), ``snapshot`` (JSON string).
 
-        Notes
-        -----
-        PIL images are embedded directly in the ``prompt`` messages.
-        Because Arrow cannot serialise PIL objects, the dataset is built
-        with only the string ``snapshot`` column going through Arrow;
-        the ``prompt`` column is injected afterwards via
-        ``Dataset.from_dict`` on a snapshot-only dataset, then merged
-        in-memory.
+            A ``set_transform`` is applied so that when TRL reads a row,
+            the ``prompt`` is returned as a ``list[dict]`` with PIL
+            images injected from the ``images`` column.  This avoids
+            Arrow ever having to serialise PIL objects inside nested
+            message dicts.
         """
-        prompts: list[list[dict]] = []
+        prompts: list[str] = []
+        all_images: list[list[bytes]] = []
         snapshots: list[str] = []
 
         obs = self.env.reset()
@@ -286,7 +318,6 @@ class DuckHuntPromptGenerator:
 
             # Only sample states where ducks are flying
             if state.get("ducks_flying", 0) == 0:
-                # Advance a bit and retry
                 self.env.advance_frames(
                     random.randint(*self.advance_range)
                 )
@@ -295,13 +326,15 @@ class DuckHuntPromptGenerator:
                 frames = self.env.get_frames()
                 state = self.env.get_state()
 
-            # Build prompt — messages contain PIL images inline
+            # Build prompt and strip PIL objects for Arrow storage
             messages, _tools = build_prompt(frames, state)
+            serialisable_messages = _strip_pil_from_messages(messages)
 
             # Snapshot for deterministic reward
             snap = capture_snapshot(self.env)
 
-            prompts.append(messages)
+            prompts.append(json.dumps(serialisable_messages))
+            all_images.append([_pil_to_bytes(f) for f in frames])
             snapshots.append(json.dumps(snap))
 
             # Advance environment to create diverse states
@@ -313,11 +346,22 @@ class DuckHuntPromptGenerator:
 
         logger.info("Dataset generation complete: %d samples", num_samples)
 
-        # Build Arrow dataset with only serialisable columns, then
-        # attach the prompt list in-memory so PIL images never touch Arrow.
-        ds = Dataset.from_dict({"snapshot": snapshots})
-        # Add prompt column as a plain Python list (bypass Arrow)
-        ds = ds.add_column("prompt", prompts)  # type: ignore[arg-type]
+        ds = Dataset.from_dict(
+            {
+                "prompt": prompts,
+                "images": all_images,
+                "snapshot": snapshots,
+            },
+            features=Features({
+                "prompt": Value("string"),
+                "images": Sequence(DatasetImage()),
+                "snapshot": Value("string"),
+            }),
+        )
+
+        # Apply a lazy transform so TRL gets fully reconstructed
+        # multimodal prompts when it reads rows (never written to Arrow).
+        ds.set_transform(_multimodal_transform)
         return ds
 
 

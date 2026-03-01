@@ -38,7 +38,6 @@ from src.dataset import (
     DuckHuntPromptGenerator,
     make_format_reward_function,
     make_reward_function,
-    reconstruct_prompt,
 )
 from src.model import load_model_and_processor, apply_lora
 
