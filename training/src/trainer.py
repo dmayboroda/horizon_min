@@ -504,7 +504,7 @@ class DuckHuntGRPOTrainer:
             comp_table.add_data(i, text, reward)
         log_dict["train/completions"] = comp_table
 
-        wandb.log(log_dict, step=self.global_step)
+        wandb.log(log_dict)
 
     def _log_metrics(self, step: int, metrics: dict) -> None:
         lr = self.scheduler.get_last_lr()[0]
@@ -532,7 +532,7 @@ class DuckHuntGRPOTrainer:
             # Only log gradient_norm on accumulation steps (when it's actually computed)
             if "gradient_norm" in metrics:
                 log_dict["train/gradient_norm"] = grad_norm
-            wandb.log(log_dict, step=step + 1)
+            wandb.log(log_dict)
 
     def _log_eval_to_wandb(self, eval_metrics: dict, step: int) -> None:
         """Log rich evaluation data to W&B: metrics, histogram, table, chart."""
@@ -598,7 +598,7 @@ class DuckHuntGRPOTrainer:
 
         log_dict["eval/best_hit_rate"] = self.best_eval_hit_rate
 
-        wandb.log(log_dict, step=step + 1)
+        wandb.log(log_dict)
 
     # ------------------------------------------------------------------
     #  Checkpointing (9.1)

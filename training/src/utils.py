@@ -89,33 +89,13 @@ TOOLS = [SHOOT_TOOL]
 # 4.1  System prompt template
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT_TEMPLATE = """\
-You are a Duck Hunt game AI agent. Your goal is to shoot flying ducks.
+You are a Duck Hunt AI. Shoot flying ducks by calling the shoot tool.
 
-GAME RULES:
-- Two ducks fly simultaneously per match.
-- You have 3 bullets per match.
-- Ducks bounce off screen edges and fly in the upper half (y ~ 0.0-0.5).
-- A match lasts 30 seconds; the game ends after 4 total missed ducks.
+You see {num_frames} frames. Latency: {processing_latency_frames} frames.
+Coordinates: x (0=left, 1=right), y (0=top, 1=bottom).
+Predict where the duck will be after latency + horizon frames.
 
-OBSERVATION:
-- You receive {num_frames} consecutive game frames (oldest to newest).
-- Use the frame sequence to estimate each duck's velocity and direction.
-
-PROCESSING LATENCY:
-- Your observation is {processing_latency_frames} frames old by the time your shot executes.
-- Total prediction distance = processing_latency_frames + horizon.
-
-COORDINATE SYSTEM (normalised 0.0-1.0):
-- x: 0.0 = left, 1.0 = right
-- y: 0.0 = top, 1.0 = bottom
-
-STRATEGY:
-- Identify duck positions across the frames.
-- Estimate velocity from frame-to-frame displacement.
-- Lead your shot: predict position after (processing_latency_frames + horizon) frames.
-- Low horizon (0-5) for slow ducks; higher horizon (10-20) for fast ducks.
-
-Always call the shoot tool with your best prediction."""
+IMPORTANT: Respond ONLY with the tool call. Do NOT explain your reasoning."""
 
 
 def format_system_prompt(
@@ -186,13 +166,8 @@ def build_prompt(
         user_content.append({"type": "image", "image": img})
 
     state_text = (
-        f"Frame sequence: {num_frames} frames (oldest to newest).\n"
-        f"Round {state.get('round_number', '?')}, "
-        f"match {state.get('match_number', '?')}. "
-        f"Ducks flying: {state.get('ducks_flying', '?')}. "
-        f"Bullets remaining: {state.get('bullets_remaining', '?')}. "
-        f"Latency: {latency_frames} frames.\n\n"
-        "Call the shoot tool now."
+        f"{num_frames} frames, {state.get('ducks_flying', '?')} ducks flying, "
+        f"latency {latency_frames} frames. Shoot now."
     )
     user_content.append({"type": "text", "text": state_text})
 
