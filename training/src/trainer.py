@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import random
 import shutil
 from pathlib import Path
 
@@ -262,19 +263,17 @@ class DuckHuntGRPOTrainer:
         grpo = self.cfg.grpo
         G = grpo.num_generations
 
-        if self.env.is_done():
-            self.env.reset()
-
-        # Get current state
-        frames = self.env.get_frames()
-        state = self.env.get_state()
-
-        if state.get("ducks_flying", 0) == 0:
-            self.env.advance_frames(15)
+        # Find a state with flying ducks (retry up to 20 times)
+        for _attempt in range(20):
             if self.env.is_done():
                 self.env.reset()
             frames = self.env.get_frames()
             state = self.env.get_state()
+            if state.get("ducks_flying", 0) > 0 and len(frames) > 0:
+                break
+            self.env.advance_frames(random.randint(10, 30))
+        else:
+            logger.warning("Could not find flying ducks after 20 attempts, using current state")
 
         # Build prompt
         messages, tools = build_prompt(frames, state)
