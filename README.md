@@ -51,6 +51,10 @@ The model is trained across six latency buckets (100–600ms), forcing it to gen
 
 Two reward signals are combined: **accuracy** (did the shot hit?) and **format** (is the output a valid tool call?).
 
+**Proximity bonus**: On misses, the reward includes a distance-based bonus that gives gradient signal even when the shot doesn't land — closer misses get a higher bonus via exponential decay (`0.5 * exp(-5.0 * dist)`). This helps the model learn to aim in the right direction before it starts hitting consistently.
+
+**Entropy bonus**: An entropy term (`-0.01 * H`) is added to the GRPO loss to prevent mode collapse. Without it, the model quickly converges to a single shot pattern (e.g. always aiming center) and stops exploring. The entropy bonus keeps the policy stochastic enough to discover better strategies across different duck trajectories and latency conditions. Temperature was also increased from 0.7 to 1.0 to support this.
+
 ### Training Setup
 
 - **Base model**: [Ministral-3-8B-Instruct-2512-BF16](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16)
