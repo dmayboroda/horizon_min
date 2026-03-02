@@ -8,7 +8,7 @@ The model outputs `shoot(x, y, horizon)` where `horizon` controls how many extra
 
 **60.9% hit rate** after GRPO training (up from ~0% base model, ~5% random baseline).
 
-> **[Live Demo](https://huggingface.co/spaces/dmayboroda/duck_hunt)** · **[Trained Model](https://huggingface.co/dmayboroda/dh_ministal_gpro)** · Base model: [Ministral-3B](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) (8.4B LLM + 0.4B Pixtral vision encoder)
+> **[Trained Model](https://huggingface.co/dmayboroda/dh_ministal_gpro)** · Base model: [Ministral-3-8B](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) (8.4B LLM + 0.4B Pixtral vision encoder)
 
 ## The Challenge
 
