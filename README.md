@@ -8,6 +8,14 @@ This project fine-tunes a vision-language model to play the classic NES Duck Hun
 
 > **[Live Demo](https://huggingface.co/spaces/dmayboroda/duck_hunt)** · **[Trained Model](https://huggingface.co/dmayboroda/dh_ministal_gpro)**
 
+## The Core Idea: Horizon Minimization
+
+The `horizon` parameter is the key insight. When the model fires, the game advances by `processing_latency + horizon` frames before checking the shot. A larger horizon gives the model more time to predict — but predictions farther into the future are less accurate because ducks bounce randomly off screen edges.
+
+The model faces a fundamental tradeoff: **predict further ahead for a better aim, or shoot sooner with less error accumulation.** The training objective explicitly penalizes large horizons on successful hits (`-0.1 * horizon/30`), pushing the model to find the minimum prediction window needed to land each shot. Hence the project name — *horizon minimization*.
+
+A model that masters this tradeoff learns to adapt its horizon per-shot: short horizons for ducks flying straight, longer horizons for ducks about to bounce, and adjusted horizons for different latency conditions.
+
 ## The Challenge
 
 Duck Hunt is deceptively hard for an AI. Ducks move fast, bounce unpredictably off screen edges, and the model must account for its own processing latency — the time between seeing frames and the shot actually landing. At 300ms latency (9 frames at 30 FPS), a duck traveling at 6 pixels/frame has moved 54 pixels by the time the bullet arrives. The model has to lead its shots.
