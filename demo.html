@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Duck Hunt Demo</title>
+  <style>
+    body { background: #1a1a2e; color: #eee; font-family: monospace; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+    h1 { color: #e94560; margin-bottom: 4px; }
+    #subtitle { color: #aaa; margin-bottom: 20px; font-size: 13px; }
+    #game-frame { border: 3px solid #e94560; border-radius: 8px; width: 512px; height: 512px; object-fit: contain; background: #000; }
+    #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0; width: 512px; }
+    .stat { background: #16213e; border-radius: 6px; padding: 10px; text-align: center; }
+    .stat-label { font-size: 11px; color: #aaa; }
+    .stat-value { font-size: 22px; font-weight: bold; color: #e94560; }
+    #controls { display: flex; gap: 10px; margin-bottom: 16px; }
+    button { background: #e94560; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; }
+    button:hover { background: #c73652; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    #shoot-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    input[type=number] { background: #16213e; color: #eee; border: 1px solid #e94560; padding: 8px; border-radius: 4px; width: 80px; font-size: 14px; }
+    label { font-size: 13px; color: #aaa; }
+    #result-banner { font-size: 18px; font-weight: bold; padding: 8px 20px; border-radius: 6px; min-height: 36px; text-align: center; margin-top: 8px; }
+    .hit { color: #00ff88; }
+    .miss { color: #ff4466; }
+    .double_kill { color: #ffd700; }
+    .no_target { color: #aaaaaa; }
+    #log { background: #16213e; border-radius: 6px; padding: 12px; width: 512px; max-height: 150px; overflow-y: auto; font-size: 12px; }
+    #log div { padding: 2px 0; border-bottom: 1px solid #222; }
+    #canvas-wrapper { position: relative; cursor: crosshair; }
+    #crosshair { position: absolute; pointer-events: none; font-size: 20px; transform: translate(-50%, -50%); display: none; }
+  </style>
+</head>
+<body>
+  <h1>Duck Hunt</h1>
+  <p id="subtitle">VLM Training Environment — Live Demo</p>
+
+  <div id="controls">
+    <button id="btn-reset" onclick="resetGame()">New Game</button>
+    <button id="btn-auto" onclick="toggleAuto()">Auto-play (Random)</button>
+  </div>
+
+  <div id="canvas-wrapper">
+    <img id="game-frame" src="" alt="Game Frame" onclick="clickShoot(event)" title="Click to shoot!"/>
+    <div id="crosshair">🎯</div>
+  </div>
+
+  <div id="stats">
+    <div class="stat"><div class="stat-label">Round</div><div class="stat-value" id="s-round">-</div></div>
+    <div class="stat"><div class="stat-label">Match</div><div class="stat-value" id="s-match">-</div></div>
+    <div class="stat"><div class="stat-label">Bullets</div><div class="stat-value" id="s-bullets">-</div></div>
+    <div class="stat"><div class="stat-label">Ducks Hit</div><div class="stat-value" id="s-ducks">-</div></div>
+  </div>
+
+  <div id="result-banner"></div>
+
+  <div id="shoot-controls">
+    <div><label>X (0.0–1.0)</label><br><input type="number" id="inp-x" value="0.5" min="0" max="1" step="0.05"></div>
+    <div><label>Y (0.0–1.0)</label><br><input type="number" id="inp-y" value="0.3" min="0" max="1" step="0.05"></div>
+    <div><label>Horizon (0–30)</label><br><input type="number" id="inp-h" value="5" min="0" max="30"></div>
+    <button onclick="manualShoot()">Shoot</button>
+  </div>
+
+  <div style="margin-top:16px; width:512px; color:#aaa; font-size:12px;">
+    <b>Log</b> <span style="float:right">or click the image to aim & shoot</span>
+  </div>
+  <div id="log"></div>
+
+  <script>
+    const API = 'http://localhost:8000';
+    let autoPlay = false;
+    let autoTimer = null;
+    let done = false;
+
+    async function resetGame() {
+      done = false;
+      document.getElementById('result-banner').textContent = '';
+      const res = await fetch(`${API}/reset`, { method: 'POST' });
+      const obs = await res.json();
+      updateUI(obs);
+      log('Game reset', '#8888ff');
+    }
+
+    async function shoot(x, y, horizon) {
+      if (done) { log('Game over — click New Game', '#ff4466'); return; }
+      const res = await fetch(`${API}/step`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x: parseFloat(x), y: parseFloat(y), horizon: parseInt(horizon), confidence: 'high' })
+      });
+      const obs = await res.json();
+      updateUI(obs);
+
+      const result = obs.last_action_result;
+      const banner = document.getElementById('result-banner');
+      const msgs = { hit: '🦆 HIT! +1.0', double_kill: '🦆🦆 DOUBLE KILL! +2.5', miss: '💨 Miss -0.3', no_target: '❌ No target -0.5' };
+      banner.textContent = msgs[result] || result;
+      banner.className = result;
+
+      log(`shoot(${x}, ${y}, h=${horizon}) → ${result} | reward=${obs.reward.toFixed(2)} | bullets=${obs.bullets_remaining}`,
+        result === 'hit' || result === 'double_kill' ? '#00ff88' : result === 'miss' ? '#ff4466' : '#aaa');
+
+      if (obs.done) {
+        done = true;
+        stopAuto();
+        banner.textContent = '💀 GAME OVER — Click New Game';
+        banner.className = 'miss';
+        log('GAME OVER', '#ff4466');
+      }
+    }
+
+    function updateUI(obs) {
+      if (obs.frames && obs.frames.length > 0) {
+        document.getElementById('game-frame').src = 'data:image/png;base64,' + obs.frames[obs.frames.length - 1];
+      }
+      document.getElementById('s-round').textContent = obs.round_number ?? '-';
+      document.getElementById('s-match').textContent = obs.match_number ?? '-';
+      document.getElementById('s-bullets').textContent = obs.bullets_remaining ?? '-';
+      document.getElementById('s-ducks').textContent = obs.round_ducks_hit ?? '-';
+    }
+
+    function manualShoot() {
+      const x = document.getElementById('inp-x').value;
+      const y = document.getElementById('inp-y').value;
+      const h = document.getElementById('inp-h').value;
+      shoot(x, y, h);
+    }
+
+    function clickShoot(event) {
+      const img = document.getElementById('game-frame');
+      const rect = img.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) / rect.width).toFixed(3);
+      const y = ((event.clientY - rect.top) / rect.height).toFixed(3);
+      const h = document.getElementById('inp-h').value;
+      document.getElementById('inp-x').value = x;
+      document.getElementById('inp-y').value = y;
+
+      // Show crosshair briefly
+      const ch = document.getElementById('crosshair');
+      ch.style.left = (event.clientX - rect.left) + 'px';
+      ch.style.top = (event.clientY - rect.top) + 'px';
+      ch.style.display = 'block';
+      setTimeout(() => ch.style.display = 'none', 400);
+
+      shoot(x, y, h);
+    }
+
+    function toggleAuto() {
+      if (autoPlay) {
+        stopAuto();
+      } else {
+        autoPlay = true;
+        document.getElementById('btn-auto').textContent = 'Stop Auto-play';
+        autoTimer = setInterval(() => {
+          if (done) { stopAuto(); return; }
+          const x = Math.random().toFixed(3);
+          const y = Math.random().toFixed(3);
+          const h = Math.floor(Math.random() * 10);
+          shoot(x, y, h);
+        }, 600);
+      }
+    }
+
+    function stopAuto() {
+      autoPlay = false;
+      clearInterval(autoTimer);
+      document.getElementById('btn-auto').textContent = 'Auto-play (Random)';
+    }
+
+    function log(msg, color = '#eee') {
+      const el = document.getElementById('log');
+      const div = document.createElement('div');
+      div.style.color = color;
+      div.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+      el.prepend(div);
+    }
+
+    // Auto-start on load
+    resetGame();
+  </script>
+</body>
+</html>
