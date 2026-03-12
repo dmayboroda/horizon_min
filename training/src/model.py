@@ -227,34 +227,7 @@ def test_inference(
 # Convenience: full setup pipeline
 # ---------------------------------------------------------------------------
 def setup_model(config: FullConfig) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
-    """Load model → apply forward_mods → apply LoRA → return (model, processor).
-
-    Forward mods MUST be applied before LoRA.  In transformers 5.x,
-    ``get_peft_model()`` overrides ``PreTrainedModel.base_model`` (which uses
-    ``base_model_prefix="model"`` to traverse the nested
-    ``Mistral3ForConditionalGeneration.model.{vision_tower,language_model}``
-    structure).  After LoRA wraps the model, that property resolves to
-    ``LoraModel`` instead of ``Mistral3Model``, shifting every navigation path
-    by one level and causing all forward-mod hooks to silently miss their
-    targets (vision tower, decoder layers, etc.).  Applying forward mods first
-    keeps them anchored to the raw model graph.
-    """
+    """Load model → apply LoRA → return (model, processor)."""
     model, processor = load_model_and_processor(config.model)
-
-    # Apply forward modifications BEFORE LoRA (raw model navigation required)
-    if hasattr(config, "forward_mod") and config.forward_mod.enabled:
-        from .forward_mods import apply_forward_mods
-
-        model, applied_mods = apply_forward_mods(model, config.forward_mod)
-        extra_params: list[torch.nn.Parameter] = []
-        for mod in applied_mods:
-            extra_params.extend(mod.extra_parameters())
-        if extra_params:
-            logger.info(
-                "Forward mods added %d extra trainable parameters",
-                sum(p.numel() for p in extra_params),
-            )
-            model._forward_mod_params = extra_params  # kept alive by the model
-
     model = apply_lora(model, config.lora)
     return model, processor
