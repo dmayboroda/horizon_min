@@ -121,7 +121,7 @@ if [[ "$BACKEND" == "vllm" ]]; then
     # ── vLLM ──────────────────────────────────────────────────────────────
     DOCKER_IMAGE="vllm/vllm-openai:latest"
 
-    CMD="--model $SERVE_MODEL"
+    CMD="$SERVE_MODEL"
     CMD="$CMD --host $HOST --port $PORT"
     CMD="$CMD --dtype $DTYPE"
     CMD="$CMD --gpu-memory-utilization $GPU_MEMORY_UTILIZATION"
