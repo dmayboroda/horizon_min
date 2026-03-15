@@ -141,7 +141,7 @@ if [[ "$BACKEND" == "vllm" ]]; then
     fi
 
     # VLM-specific: enable image input
-    CMD="$CMD --limit-mm-per-prompt image=32"
+    CMD="$CMD --limit-mm-per-prompt '{\"image\": 32}'"
 
     if [[ -n "$EXTRA_ARGS" ]]; then
         CMD="$CMD $EXTRA_ARGS"
