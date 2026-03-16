@@ -140,8 +140,8 @@ if [[ "$BACKEND" == "vllm" ]]; then
         CMD="$CMD --enable-chunked-prefill"
     fi
 
-    # VLM-specific: enable image input
-    CMD="$CMD --limit-mm-per-prompt '{\"image\": 32}'"
+    # VLM-specific: enable image input (dot-notation for vLLM 0.17+)
+    CMD="$CMD --limit-mm-per-prompt.image 32"
 
     if [[ -n "$EXTRA_ARGS" ]]; then
         CMD="$CMD $EXTRA_ARGS"
@@ -154,8 +154,9 @@ if [[ "$BACKEND" == "vllm" ]]; then
         --ipc=host \
         -p "$PORT:$PORT" \
         $VOLUME_MOUNTS \
+        --entrypoint /bin/bash \
         "$DOCKER_IMAGE" \
-        $CMD
+        -c "pip install 'transformers>=5.0.0' --quiet && vllm serve $CMD"
 
 elif [[ "$BACKEND" == "sglang" ]]; then
     # ── SGLang ────────────────────────────────────────────────────────────
