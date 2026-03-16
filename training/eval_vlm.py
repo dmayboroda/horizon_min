@@ -344,8 +344,6 @@ def query_model(
     response = client.chat.completions.create(
         model=model_id,
         messages=messages,
-        tools=[SHOOT_TOOL_OPENAI],
-        tool_choice="auto",
         temperature=gen.get("temperature", 0.1),
         max_tokens=gen.get("max_new_tokens", 256),
     )
