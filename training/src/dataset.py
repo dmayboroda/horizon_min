@@ -424,9 +424,33 @@ def make_reward_function(reward_config: RewardConfig, max_horizon: int = MAX_HOR
 def make_format_reward_function(max_horizon: int = MAX_HORIZON):
     """Return a reward function that scores output format quality.
 
-    Gives a bonus when the model produces a correctly structured tool
-    call, regardless of whether the shot hits.
+    Scoring:
+      - 0.0: no parseable tool call at all
+      - 1.0: valid tool call with concise output (just the call, minimal extra text)
+      - 0.3–0.9: valid tool call but penalised for verbosity (extra explanation text)
+
+    The verbosity penalty discourages the model from generating explanations,
+    commentary, or filler text around the tool call.
     """
+    import re
+
+    # Tokens that are not "real" text (padding, special tokens, end markers)
+    _STRIP_PAT = re.compile(
+        r"<\|[^|]*\|>|<\|im_end\|>|<\|pad\|>|<\|tool_call_start\|>|<\|tool_call_end\|>"
+        r"|\[TOOL_CALLS\]|\</s>",
+    )
+
+    def _count_extra_chars(text: str) -> int:
+        """Count non-tool-call characters (text the model shouldn't be generating)."""
+        # Strip special tokens and padding
+        cleaned = _STRIP_PAT.sub("", text)
+        # Strip the tool call itself (shoot(...) or JSON)
+        cleaned = re.sub(r"shoot\s*\([^)]*\)", "", cleaned)
+        cleaned = re.sub(r'\[\s*\{[^]]*\}\s*\]', "", cleaned)
+        cleaned = re.sub(r'\{[^}]*\}', "", cleaned)
+        # Strip whitespace and brackets
+        cleaned = re.sub(r'[\s\[\]]', "", cleaned)
+        return len(cleaned)
 
     def format_reward_func(completions, **kwargs) -> list[float]:
         rewards: list[float] = []
@@ -435,10 +459,19 @@ def make_format_reward_function(max_horizon: int = MAX_HORIZON):
                 completion_text = completion_text[0].get("content", "")
 
             action = parse_tool_call(completion_text, max_horizon=max_horizon)
-            if action is not None:
+            if action is None:
+                rewards.append(0.0)
+                continue
+
+            # Valid tool call — now penalise verbosity
+            extra = _count_extra_chars(completion_text)
+            if extra <= 5:
+                # Clean output: just the tool call
                 rewards.append(1.0)
             else:
-                rewards.append(0.0)
+                # Penalty scales with extra text length, floors at 0.3
+                penalty = min(0.7, extra * 0.01)
+                rewards.append(max(0.3, 1.0 - penalty))
 
         return rewards
 

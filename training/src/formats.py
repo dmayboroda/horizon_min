@@ -324,11 +324,19 @@ class LiquidAIFormat(ModelFormat):
 
     @staticmethod
     def _parse_kwargs(args_str: str, max_horizon: int) -> Action | None:
+        # Try keyword args first: shoot(x=0.5, y=0.3, horizon=8)
         vals = {}
         for match in re.finditer(r"(\w+)\s*=\s*([0-9.eE+-]+)", args_str):
             vals[match.group(1)] = match.group(2)
         if "x" in vals and "y" in vals:
             return _build_action(vals["x"], vals["y"], vals.get("horizon", "0"), max_horizon)
+
+        # Fallback: positional args: shoot(0.5, 0.3, 8)
+        nums = re.findall(r"[0-9.eE+-]+", args_str)
+        if len(nums) >= 2:
+            horizon = nums[2] if len(nums) >= 3 else "0"
+            return _build_action(nums[0], nums[1], horizon, max_horizon)
+
         return None
 
 
