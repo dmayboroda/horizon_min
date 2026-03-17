@@ -1,31 +1,40 @@
 """Main training script for Duck Hunt GRPO.
 
+Supports both Mistral and LiquidAI model families — auto-detected from config.
+
 Usage::
 
-    # TRL GRPOTrainer (default)
+    # Mistral (TRL GRPOTrainer)
     python train.py --config configs/ministral_config.yaml
 
-    # Custom GRPO loop (fallback)
-    python train.py --config configs/ministral_config.yaml --custom
+    # LiquidAI with LoRA
+    python train.py --config configs/liquidai_config.yaml
+
+    # LiquidAI without LoRA
+    python train.py --config configs/liquidai_nolora_config.yaml
+
+    # Custom GRPO loop (any model)
+    python train.py --config configs/liquidai_config.yaml --custom
 
     # CLI overrides
-    python train.py --config configs/ministral_config.yaml \\
+    python train.py --config configs/liquidai_config.yaml \\
         --override training.learning_rate=2e-5 \\
         --override grpo.num_generations=8
 
     # Layer configs (base + model-specific)
     python train.py \\
         --config configs/base_config.yaml \\
-        --config configs/ministral_config.yaml
+        --config configs/liquidai_config.yaml
 
     # Resume from checkpoint (custom mode)
-    python train.py --config configs/ministral_config.yaml --custom \\
-        --resume outputs/duckhunt_grpo/checkpoint-500
+    python train.py --config configs/liquidai_config.yaml --custom \\
+        --resume outputs/lfm25_duckhunt_grpo/checkpoint-500
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -40,6 +49,7 @@ from src.dataset import (
     make_reward_function,
 )
 from src.model import load_model_and_processor, apply_lora
+from src.utils import set_model_format
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +65,6 @@ logger = logging.getLogger(__name__)
 def _parse_override(s: str) -> tuple[str, str | float | int | bool]:
     """Parse ``key=value`` into (key, typed_value)."""
     key, _, raw_val = s.partition("=")
-    # Try int → float → bool → str
     for converter in (int, float):
         try:
             return key, converter(raw_val)
@@ -81,7 +90,7 @@ def load_config(args: argparse.Namespace) -> FullConfig:
 
 
 # ===================================================================
-#  TRL GRPOTrainer path  (Step 7.1)
+#  TRL GRPOTrainer path
 # ===================================================================
 def train_trl(cfg: FullConfig, num_samples: int) -> None:
     """Train using TRL's ``GRPOTrainer``."""
@@ -110,14 +119,13 @@ def train_trl(cfg: FullConfig, num_samples: int) -> None:
             task_type=cfg.lora.task_type,
         )
 
-    # 4. Build TRL GRPOConfig (merges our GRPO + Training + Logging fields)
+    # 4. Build TRL GRPOConfig
     grpo = cfg.grpo
     train = cfg.training
     log_cfg = cfg.logging
 
     trl_config = TRLGRPOConfig(
         output_dir=train.output_dir,
-        # Training args
         num_train_epochs=train.num_train_epochs,
         max_steps=train.max_steps,
         per_device_train_batch_size=train.per_device_train_batch_size,
@@ -157,7 +165,7 @@ def train_trl(cfg: FullConfig, num_samples: int) -> None:
         reward_weights=[cfg.reward.accuracy_weight, cfg.reward.format_weight],
     )
 
-    # 5. Create reward functions
+    # 5. Create reward functions (use active format's parser)
     accuracy_fn = make_reward_function(cfg.reward, cfg.environment.max_horizon)
     format_fn = make_format_reward_function(cfg.environment.max_horizon)
 
@@ -205,9 +213,27 @@ def _push_to_hub(cfg: FullConfig, checkpoint_dir: str) -> None:
         ignore_patterns=["optimizer.pt", "scheduler.pt"],
     )
 
+    # Determine model-specific tags and tool format description
+    model_lower = cfg.model.model_name.lower()
+    if "liquidai" in model_lower or "lfm" in model_lower:
+        extra_tags = "  - liquidai\n  - lfm2.5"
+        tool_format = "LiquidAI Pythonic (`<|tool_call_start|>[shoot(...)]<|tool_call_end|>`)"
+    else:
+        extra_tags = "  - mistral"
+        tool_format = "Mistral native (`[TOOL_CALLS] [{...}]`)"
+
+    lora_info = ""
+    if cfg.lora.enabled:
+        lora_info = (
+            f"\n- **LoRA rank**: {cfg.lora.r}, alpha: {cfg.lora.lora_alpha}"
+            f"\n- **Target modules**: {', '.join(cfg.lora.target_modules)}"
+        )
+    else:
+        lora_info = "\n- **Mode**: Full fine-tune (no LoRA)"
+
     card_content = f"""\
 ---
-library_name: peft
+library_name: {"peft" if cfg.lora.enabled else "transformers"}
 base_model: {cfg.model.model_name}
 tags:
   - grpo
@@ -215,27 +241,29 @@ tags:
   - duck-hunt
   - vision-language-model
   - tool-calling
+{extra_tags}
 ---
 
 # {repo_id.split('/')[-1]}
 
-LoRA adapter for [{cfg.model.model_name}](https://huggingface.co/{cfg.model.model_name}),
-fine-tuned with GRPO to play Duck Hunt.
+{"LoRA adapter" if cfg.lora.enabled else "Fine-tuned model"} for \
+[{cfg.model.model_name}](https://huggingface.co/{cfg.model.model_name}),
+trained with GRPO to play Duck Hunt.
 
 ## Training
 
 - **Method**: Group Relative Policy Optimization (GRPO)
-- **LoRA rank**: {cfg.lora.r}, alpha: {cfg.lora.lora_alpha}
-- **Target modules**: {', '.join(cfg.lora.target_modules)}
+- **Tool format**: {tool_format}
+{lora_info}
 - **Learning rate**: {cfg.training.learning_rate}
 
 ## Usage
 
 ```python
-from peft import AutoPeftModelForCausalLM
+{"from peft import AutoPeftModelForCausalLM" if cfg.lora.enabled else "from transformers import AutoModelForImageTextToText"}
 from transformers import AutoProcessor
 
-model = AutoPeftModelForCausalLM.from_pretrained("{repo_id}")
+{"model = AutoPeftModelForCausalLM" if cfg.lora.enabled else "model = AutoModelForImageTextToText"}.from_pretrained("{repo_id}")
 processor = AutoProcessor.from_pretrained("{repo_id}")
 ```
 """
@@ -246,7 +274,7 @@ processor = AutoProcessor.from_pretrained("{repo_id}")
 
 
 # ===================================================================
-#  Custom GRPO loop path  (Step 7.2)
+#  Custom GRPO loop path
 # ===================================================================
 def train_custom(cfg: FullConfig, resume_from: str | None = None) -> None:
     """Train using the custom ``DuckHuntGRPOTrainer``."""
@@ -258,7 +286,8 @@ def train_custom(cfg: FullConfig, resume_from: str | None = None) -> None:
 
     # 2. Model + LoRA
     model, processor = load_model_and_processor(cfg.model)
-    model = apply_lora(model, cfg.lora)
+    if cfg.lora.enabled:
+        model = apply_lora(model, cfg.lora)
 
     # 3. Trainer
     trainer = DuckHuntGRPOTrainer(
@@ -329,7 +358,13 @@ def main() -> None:
     if args.hub_model_id:
         cfg.hub.hub_model_id = args.hub_model_id
 
-    logger.info("Config loaded: model=%s", cfg.model.model_name)
+    # Activate the right tool-call format based on model name
+    set_model_format(cfg.model.model_name)
+
+    logger.info(
+        "Config loaded: model=%s, lora=%s",
+        cfg.model.model_name, cfg.lora.enabled,
+    )
 
     if args.custom:
         train_custom(cfg, resume_from=args.resume)

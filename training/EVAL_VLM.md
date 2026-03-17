@@ -2,6 +2,8 @@
 
 Evaluates Vision-Language Models served via vLLM or SGLang on the Duck Hunt horizon minimization task. The eval script queries the model through an OpenAI-compatible API — no local model loading.
 
+Supports both Mistral and LiquidAI model families (and any future models added to the training pipeline).
+
 ## Quick Start
 
 ```bash
@@ -24,7 +26,8 @@ python eval_vlm.py --config configs/liquidai_eval.yaml \
 # With Weave tracking (results in W&B console)
 python eval_vlm.py --config configs/liquidai_eval.yaml --weave
 
-# Post-training eval (serve checkpoint first)
+# Post-training eval (train first, then serve checkpoint)
+./run_training.sh --config configs/liquidai_config.yaml
 ./serve_vlm.sh --checkpoint outputs/lfm25_duckhunt_grpo/best
 python eval_vlm.py --config configs/liquidai_eval.yaml \
     --checkpoint outputs/lfm25_duckhunt_grpo/best
@@ -206,16 +209,19 @@ python eval_vlm.py --config configs/liquidai_eval.yaml --weave
 ### Pre vs Post Training Comparison
 
 ```bash
-# Before training
+# Before training — evaluate base model
 ./serve_vlm.sh --model LiquidAI/LFM2.5-VL-1.6B
 python eval_vlm.py --config configs/liquidai_eval.yaml \
     --weave --weave-project duckhunt-liquidai
 
-# After training
+# Train (unified script — auto-detects LiquidAI format)
+./run_training.sh --config configs/liquidai_config.yaml
+
+# After training — evaluate fine-tuned checkpoint
 ./serve_vlm.sh --stop
-./serve_vlm.sh --checkpoint outputs/lfm25_grpo/best
+./serve_vlm.sh --checkpoint outputs/lfm25_duckhunt_grpo/best
 python eval_vlm.py --config configs/liquidai_eval.yaml \
-    --checkpoint outputs/lfm25_grpo/best \
+    --checkpoint outputs/lfm25_duckhunt_grpo/best \
     --weave --weave-project duckhunt-liquidai
 ```
 

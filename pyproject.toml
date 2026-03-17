@@ -40,6 +40,7 @@ training = [
     "pyyaml>=6.0",
     "wandb>=0.18.0",
     "huggingface_hub>=0.25.0",
+    "openai>=1.0.0",
     # flash-attn is optional — install separately if needed:
     #   uv pip install flash-attn --no-build-isolation
     # Without it, set model.attn_implementation to "sdpa" or "eager"

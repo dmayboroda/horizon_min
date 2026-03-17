@@ -1,0 +1,116 @@
+# =============================================================================
+# Duck Hunt GRPO Training — LiquidAI LFM2.5-VL-1.6B
+# =============================================================================
+# LFM2.5-VL: 1.2B LM backbone (10 LIV conv + 6 GQA blocks) + 400M SigLIP2 vision = ~1.6B params
+# Fits comfortably in 8GB VRAM (BF16), <4GB quantised.
+# 32k context window, multimodal (SigLIP2 NaFlex 512×512 tiles).
+#
+# Tool call format: <|tool_call_start|>[shoot(x=0.3, y=0.2, horizon=5)]<|tool_call_end|>
+#
+# Measured processing latencies (frames → ms):
+#   2 frames  → ~100ms  (3 latency frames @ 30fps)
+#   4 frames  → ~150ms  (5 latency frames)
+#   6 frames  → ~180ms  (6 latency frames)
+#   10 frames → ~200ms  (6 latency frames)
+#   14 frames → ~250ms  (8 latency frames)
+#   18 frames → ~290ms  (9 latency frames)
+#   20 frames → ~300ms  (9 latency frames)
+#
+# Usage:
+#   # Full fine-tune (LoRA on all projections + MLP)
+#   python train_liquidai.py --config configs/liquidai_config.yaml
+#
+#   # Without LoRA (full fine-tune, needs more VRAM)
+#   python train_liquidai.py --config configs/liquidai_config.yaml \
+#       --override lora.enabled=false
+#
+#   # LoRA on attention only (lighter)
+#   python train_liquidai.py --config configs/liquidai_config.yaml \
+#       --override lora.target_modules='["q_proj","k_proj","v_proj","out_proj"]'
+
+model:
+  model_name: "LiquidAI/LFM2.5-VL-1.6B"
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"
+  trust_remote_code: true
+  device_map: "auto"
+  quantization: null                       # small enough for BF16; use "4bit" for <4GB
+
+lora:
+  enabled: true
+  r: 16
+  lora_alpha: 16                           # LiquidAI recommended: alpha == r
+  lora_dropout: 0.0                        # LiquidAI recommended: no dropout
+  target_modules:                          # LFM2.5 architecture modules
+    - q_proj                               # attention query
+    - k_proj                               # attention key
+    - v_proj                               # attention value
+    - out_proj                             # attention output
+    - in_proj                              # LIV convolution input
+    - w1                                   # MLP gate
+    - w2                                   # MLP down
+    - w3                                   # MLP up
+  task_type: "CAUSAL_LM"
+  bias: "none"
+
+grpo:
+  num_generations: 6                       # more generations (model is 6x smaller than Mistral)
+  max_completion_length: 128               # LFM tool calls are compact: <|tool_call_start|>[shoot(...)]<|tool_call_end|>
+  temperature: 1.0                         # exploration during training
+  top_p: 0.95
+  top_k: 0
+  beta: 0.0                               # no KL penalty initially
+  num_iterations: 1
+  epsilon: 0.2
+  loss_type: "grpo"
+  scale_rewards: "group"
+  entropy_coeff: 0.01
+  use_vllm: false
+
+training:
+  output_dir: "./outputs/lfm25_duckhunt_grpo"
+  num_train_epochs: 3
+  max_steps: -1
+  per_device_train_batch_size: 2           # larger batch (1.6B vs 9B)
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-5                    # higher LR for smaller model
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 1.0
+  bf16: true
+  fp16: false
+  logging_steps: 1
+  save_steps: 100
+  save_total_limit: 3
+  eval_strategy: "no"
+  eval_steps: 100
+  seed: 42
+  dataloader_num_workers: 4
+  gradient_checkpointing: true
+
+environment:
+  # LiquidAI-specific latency tiers based on measured processing times
+  # Model is fast: 100-300ms for 2-20 frames
+  latency_options_ms: [100, 150, 200, 250, 300]
+  frames_per_observation: 4
+  frames_per_observation_min: 2
+  frames_per_observation_max: 10           # can handle many frames cheaply
+
+reward:
+  hit: 1.0
+  double_kill: 2.5
+  miss: -0.3
+  shoot_nothing: -0.5
+  lambda_horizon: 0.1
+  proximity_bonus: 0.5
+  proximity_decay: 5.0
+  format_weight: 0.3
+  accuracy_weight: 1.0
+
+logging:
+  wandb_project: "duckhunt-grpo"
+  wandb_run_name: "lfm25-vl-1.6b-grpo"
+  report_to: "wandb"
+  log_completions: true
+  num_completions_to_print: 5

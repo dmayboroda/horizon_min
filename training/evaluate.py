@@ -33,7 +33,7 @@ from src.config import FullConfig
 from src.environment import DuckHuntEnvWrapper
 from src.model import load_model_and_processor, apply_lora
 from src.reward import compute_reward
-from src.utils import TOOLS, Action, build_prompt, parse_tool_call
+from src.utils import TOOLS, Action, build_prompt, parse_tool_call, set_model_format
 
 logging.basicConfig(
     level=logging.INFO,
@@ -548,6 +548,9 @@ def main() -> None:
         cfg = FullConfig.from_yaml(args.config[0])
     else:
         cfg = FullConfig.from_yamls(*args.config)
+
+    # Activate the right tool-call format based on model name
+    set_model_format(cfg.model.model_name)
 
     # Model
     if args.checkpoint:

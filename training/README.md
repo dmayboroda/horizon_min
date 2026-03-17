@@ -1,48 +1,41 @@
 # Duck Hunt GRPO Training
 
-Train [Ministral-3-8B-Instruct-2512-BF16](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) to play Duck Hunt using **Group Relative Policy Optimization (GRPO)** with the [Duck Hunt OpenEnv](../duck_hunt_openenv/).
+Train Vision-Language Models to play Duck Hunt using **Group Relative Policy Optimization (GRPO)** with the [Duck Hunt OpenEnv](../duck_hunt_openenv/).
 
-The model observes sequences of game frames through its Pixtral vision encoder and learns to predict where ducks will be after a variable number of future frames, outputting `shoot(x, y, horizon)` tool calls compatible with the OpenAI SDK.
+Supported model families:
 
-## Architecture
+| Model | Params | Tool-call format | VRAM (BF16) | VRAM (4-bit) |
+|-------|--------|------------------|-------------|--------------|
+| [Ministral-3-8B-Instruct-2512](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) | 8.4B LLM + 0.4B Pixtral vision | `[TOOL_CALLS] [{"name":"shoot",...}]` | 24GB | 12GB |
+| [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) | 1.2B LFM + 400M SigLIP2 vision | `<\|tool_call_start\|>[shoot(...)]<\|tool_call_end\|>` | 8GB | 4GB |
 
-```
-                   Game Frames (512x512)
-                          |
-                   Pixtral Vision Encoder (0.4B)
-                          |
-                   Ministral LLM (8.4B)
-                          |
-               [TOOL_CALLS] shoot(x, y, horizon)
-                          |
-              Environment simulates shot -> reward
-                          |
-                     GRPO update
-```
-
-**Model**: 8.4B LLM + 0.4B vision encoder = ~9B params (BF16). Fits in 24GB VRAM, <12GB quantised.
-
-**Output format**: Mistral native tool calling tokens (`[TOOL_CALLS]`), servable via vLLM/TGI with standard OpenAI `tools`/`tool_choice` parameters.
+The model family is **auto-detected** from the config — one script handles all models.
 
 ## Quick Start
 
 ```bash
 cd training
 
-# Run with defaults (TRL GRPOTrainer, W&B logging)
-./run_training.sh
+# Mistral with LoRA (default)
+./run_training.sh --config configs/ministral_config.yaml
 
-# Or without W&B
-./run_training.sh --no-wandb
+# LiquidAI with LoRA
+./run_training.sh --config configs/liquidai_config.yaml
 
-# Custom GRPO loop (fallback)
-./run_training.sh --custom
+# LiquidAI full fine-tune (no LoRA)
+./run_training.sh --config configs/liquidai_nolora_config.yaml
+
+# Without W&B logging
+./run_training.sh --config configs/liquidai_config.yaml --no-wandb
+
+# Custom GRPO loop (any model)
+./run_training.sh --config configs/liquidai_config.yaml --custom
 ```
 
 ## Requirements
 
 - Python 3.10+
-- CUDA GPU with 24GB+ VRAM (BF16) or 12GB+ (quantised)
+- CUDA GPU (see VRAM table above)
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - The Duck Hunt OpenEnv game engine (included in this repo)
 
@@ -51,27 +44,42 @@ cd training
 uv sync --extra training
 ```
 
-Key dependencies: `torch>=2.4`, `transformers>=4.45`, `trl>=0.15`, `peft>=0.13`, `flash-attn>=2.6`, `wandb>=0.18`, `huggingface_hub>=0.25`.
+Key dependencies: `torch>=2.4`, `transformers>=5.1`, `trl>=0.15`, `peft>=0.13`, `wandb>=0.18`, `huggingface_hub>=0.25`.
 
 ## Project Structure
 
 ```
 training/
-├── run_training.sh              # Launch script
-├── train.py                     # Main entry point (TRL + custom modes)
+├── run_training.sh              # Unified launch script (all models)
+├── train.py                     # Unified training entry point (TRL + custom modes)
 ├── evaluate.py                  # Evaluation with baselines
+├── eval_vlm.py                  # API-based VLM evaluation (served models)
+├── serve_vlm.sh                 # Model serving via vLLM/SGLang
 ├── configs/
-│   ├── base_config.yaml         # Default hyperparameters
-│   └── ministral_config.yaml    # Ministral-specific overrides
+│   ├── base_config.yaml         # Shared defaults (reward, environment, etc.)
+│   ├── ministral_config.yaml    # Mistral-specific overrides
+│   ├── liquidai_config.yaml     # LiquidAI + LoRA
+│   ├── liquidai_nolora_config.yaml  # LiquidAI full fine-tune
+│   └── liquidai_eval.yaml       # API-based eval config
 └── src/
     ├── config.py                # Configuration dataclasses + YAML loading
+    ├── formats.py               # Model-specific: tool schemas, prompt builders, parsers
+    ├── utils.py                 # Shared: Action, system prompt, format dispatch
     ├── model.py                 # Model/processor loading, LoRA setup
     ├── environment.py           # DuckHuntEnvWrapper (direct, no HTTP)
-    ├── utils.py                 # Tool schema, prompt builder, output parser
     ├── reward.py                # Reward computation
     ├── dataset.py               # Dataset generation, snapshot system, TRL reward fns
     └── trainer.py               # Custom GRPO trainer with checkpointing + W&B
 ```
+
+## How Format Auto-Detection Works
+
+`train.py` reads the `model.model_name` from config and calls `set_model_format()`:
+
+- `mistralai/*` → `MistralFormat` (JSON tool calls, `[TOOL_CALLS]` tokens)
+- `LiquidAI/*` or `LFM*` → `LiquidAIFormat` (Pythonic tool calls, `<|tool_call_start|>` tokens)
+
+All downstream code (`dataset.py`, `trainer.py`, `evaluate.py`) uses the active format transparently through `build_prompt()` and `parse_tool_call()` from `src/utils.py`.
 
 ## Training Modes
 
@@ -80,29 +88,29 @@ training/
 Uses HuggingFace TRL's `GRPOTrainer`. Generates an offline dataset of `(prompt, images, snapshot)` tuples, then trains with two reward functions:
 
 ```bash
-python train.py --config configs/ministral_config.yaml --num-samples 1000
+python train.py --config configs/liquidai_config.yaml --num-samples 1000
 ```
 
 ### Custom GRPO Loop
 
-Fallback for when TRL doesn't handle the multimodal + environment-reward workflow cleanly. Runs the full GRPO algorithm manually with online environment interaction:
+Runs the full GRPO algorithm manually with online environment interaction:
 
 ```bash
-python train.py --config configs/ministral_config.yaml --custom
+python train.py --config configs/liquidai_config.yaml --custom
 ```
 
 Supports resuming from checkpoints:
 
 ```bash
-python train.py --config configs/ministral_config.yaml --custom \
-    --resume outputs/ministral_duckhunt_grpo/checkpoint-500
+python train.py --config configs/liquidai_config.yaml --custom \
+    --resume outputs/lfm25_duckhunt_grpo/checkpoint-500
 ```
 
 ## How It Works
 
 ### Observation
 
-The model receives 4 consecutive 512x512 game frames (oldest to newest) plus game state metadata (round, bullets remaining, latency). This lets it estimate duck velocity from frame-to-frame displacement.
+The model receives consecutive 512x512 game frames (oldest to newest) plus game state metadata (round, bullets remaining, latency). This lets it estimate duck velocity from frame-to-frame displacement.
 
 ### Action Space
 
@@ -136,7 +144,7 @@ Two reward signals are combined during training:
 
 For each game state:
 
-1. Sample `G=4` completions from the current policy
+1. Sample `G` completions from the current policy (4 for Mistral, 6 for LiquidAI)
 2. Score each completion against the environment (deterministic replay via snapshot)
 3. Normalise advantages within the group
 4. Compute the clipped surrogate objective (PPO-style, epsilon=0.2)
@@ -151,48 +159,60 @@ To compute rewards for the TRL path (offline dataset), the system captures a **s
 Configs use a layered YAML system. The base config sets defaults; model-specific configs override them:
 
 ```bash
-# Single config
-python train.py --config configs/ministral_config.yaml
+# Single config (includes model-specific defaults)
+python train.py --config configs/liquidai_config.yaml
 
 # Layered (base + overrides)
 python train.py \
     --config configs/base_config.yaml \
-    --config configs/ministral_config.yaml
+    --config configs/liquidai_config.yaml
 
 # CLI overrides (dot-separated)
-python train.py --config configs/ministral_config.yaml \
-    --override training.learning_rate=2e-6 \
+python train.py --config configs/liquidai_config.yaml \
+    --override training.learning_rate=3e-5 \
     --override grpo.num_generations=8
 ```
 
 ### Key Hyperparameters
 
-| Parameter | Default (Ministral) | Description |
-|-----------|---------------------|-------------|
-| `training.learning_rate` | 5e-6 | Peak learning rate |
-| `training.per_device_train_batch_size` | 1 | Batch size per GPU |
-| `training.gradient_accumulation_steps` | 8 | Effective batch = 8 |
-| `grpo.num_generations` | 4 | Completions per prompt |
-| `grpo.temperature` | 0.7 | Sampling temperature |
-| `grpo.beta` | 0.0 | KL penalty (0 = no ref model) |
-| `grpo.epsilon` | 0.2 | Clipping range |
-| `lora.r` | 16 | LoRA rank |
-| `lora.lora_alpha` | 32 | LoRA scaling |
-| `training.save_steps` | 100 | Checkpoint interval |
-| `training.eval_steps` | 100 | Evaluation interval |
+| Parameter | Ministral | LiquidAI (LoRA) | LiquidAI (Full) |
+|-----------|-----------|-----------------|------------------|
+| `training.learning_rate` | 5e-6 | 2e-5 | 5e-6 |
+| `training.per_device_train_batch_size` | 1 | 2 | 1 |
+| `training.gradient_accumulation_steps` | 8 | 4 | 8 |
+| `grpo.num_generations` | 4 | 6 | 4 |
+| `grpo.max_completion_length` | 256 | 128 | 128 |
+| `lora.r` | 16 | 16 | — |
+| `lora.lora_alpha` | 32 | 16 | — |
 
 ### LoRA
 
-Fine-tuning uses LoRA on the attention projection layers (`q_proj`, `k_proj`, `v_proj`, `o_proj`) with rank 16. Only ~0.2% of parameters are trainable.
+LoRA target modules differ by architecture:
+
+| Model | Target modules | Trainable % |
+|-------|---------------|-------------|
+| Ministral | `q_proj`, `k_proj`, `v_proj`, `o_proj` | ~0.2% |
+| LiquidAI | `q_proj`, `k_proj`, `v_proj`, `out_proj`, `in_proj`, `w1`, `w2`, `w3` | ~1.5% |
+
+LiquidAI's hybrid architecture (10 LIV convolution blocks + 6 GQA blocks) exposes additional MLP gates (`w1`, `w2`, `w3`) and a convolution input projection (`in_proj`).
+
+### Latency Simulation
+
+The environment simulates real-world inference latency. During training, `processing_latency_ms` is randomly sampled:
+
+| Model | Latency options (ms) | Rationale |
+|-------|---------------------|-----------|
+| Ministral | 100, 200, 300, 400, 500, 600 | Larger model, slower inference |
+| LiquidAI | 100, 150, 200, 250, 300 | Measured: 2 frames=100ms, 10 frames=200ms, 20 frames=300ms |
 
 ## Checkpointing
 
 The custom trainer saves full checkpoints at every `save_steps`:
 
 ```
-outputs/ministral_duckhunt_grpo/
+outputs/lfm25_duckhunt_grpo/
 ├── checkpoint-100/
-│   ├── adapter_model.safetensors
+│   ├── adapter_model.safetensors    # (or model.safetensors for full fine-tune)
 │   ├── adapter_config.json
 │   ├── optimizer.pt
 │   ├── scheduler.pt
@@ -224,12 +244,13 @@ Upload trained checkpoints to HF Hub after training:
 
 ```bash
 # Via CLI flags
-./run_training.sh --push-to-hub --hub-model-id username/duckhunt-ministral-grpo
+./run_training.sh --config configs/liquidai_config.yaml \
+    --push-to-hub --hub-model-id username/duckhunt-lfm25-grpo
 
 # Via config override
-python train.py --config configs/ministral_config.yaml \
+python train.py --config configs/liquidai_config.yaml \
     --override hub.push_to_hub=true \
-    --override hub.hub_model_id=username/duckhunt-ministral-grpo
+    --override hub.hub_model_id=username/duckhunt-lfm25-grpo
 ```
 
 Or set it in your YAML config:
@@ -237,26 +258,26 @@ Or set it in your YAML config:
 ```yaml
 hub:
   push_to_hub: true
-  hub_model_id: "username/duckhunt-ministral-grpo"
+  hub_model_id: "username/duckhunt-lfm25-grpo"
   hub_private: true  # default
 ```
 
 What gets uploaded:
-- LoRA adapter weights (`adapter_model.safetensors`, `adapter_config.json`)
+- LoRA adapter weights (or full model weights for no-LoRA training)
 - Processor/tokenizer files
-- Auto-generated model card with training details
+- Auto-generated model card with training details and tool format info
 - Optimizer and scheduler states are excluded to keep the repo lightweight
-
-The best checkpoint (by eval hit_rate) is uploaded by default. If no evaluation was run, the latest checkpoint is used instead.
 
 Requires authentication: `huggingface-cli login` before training.
 
 ## Evaluation
 
+### Local Evaluation (checkpoint loaded directly)
+
 ```bash
-# Evaluate a checkpoint
-python evaluate.py --config configs/ministral_config.yaml \
-    --checkpoint outputs/ministral_duckhunt_grpo/best_checkpoint \
+# Evaluate a checkpoint (any model family)
+python evaluate.py --config configs/liquidai_config.yaml \
+    --checkpoint outputs/lfm25_duckhunt_grpo/best_checkpoint \
     --num-episodes 5
 
 # With baselines comparison
@@ -265,38 +286,45 @@ python evaluate.py --config configs/ministral_config.yaml \
     --baselines --output results.json
 ```
 
-Evaluation runs across all latency buckets (100-600ms) and reports:
+### API-Based Evaluation (served model)
+
+See [EVAL_VLM.md](EVAL_VLM.md) for full documentation on evaluating models served via vLLM/SGLang.
+
+```bash
+# 1. Serve the model
+./serve_vlm.sh --model LiquidAI/LFM2.5-VL-1.6B
+
+# 2. Run eval
+python eval_vlm.py --config configs/liquidai_eval.yaml
+```
+
+Evaluation runs across all latency buckets and reports:
 
 - **Core**: hit_rate, double_kill_rate, miss_rate, invalid_action_rate, average_reward
 - **Horizon**: average, std, min, max
 - **Per-latency**: hit_rate and average_horizon broken down by latency bucket
-- **Hardware-aware**: generalization_gap (best - worst latency), adaptation_score (correlation between latency and horizon)
+- **Hardware-aware**: generalization_gap (best - worst latency), adaptation_score
 
 Baselines:
 - **Random**: uniform random x, y (upper half), horizon
 - **Fixed horizon**: centre shot (0.5, 0.25) with horizon=10
 
-## Latency Simulation
-
-The environment simulates real-world inference latency. During training, `processing_latency_frames` is randomly sampled from `[100, 200, 300, 400, 500, 600]` ms (converted to frames at 30 FPS = `[3, 6, 9, 12, 15, 18]` frames). The model sees the latency value in its prompt and must learn to adjust its `horizon` parameter accordingly — higher latency requires more aggressive prediction.
-
 ## Serving the Trained Model
 
-The trained LoRA adapter produces standard Mistral tool calls, compatible with any OpenAI-SDK-compatible server:
+The trained model produces tool calls in its native format, compatible with any OpenAI-SDK-compatible server:
 
 ```bash
-# vLLM
-python -m vllm.entrypoints.openai.api_server \
-    --model mistralai/Ministral-3-8B-Instruct-2512-BF16 \
-    --enable-lora \
-    --lora-modules duckhunt=outputs/ministral_duckhunt_grpo/best_checkpoint
+# Serve with vLLM
+./serve_vlm.sh --model LiquidAI/LFM2.5-VL-1.6B
+# Or with a fine-tuned checkpoint
+./serve_vlm.sh --checkpoint outputs/lfm25_duckhunt_grpo/best
 
 # Client (OpenAI SDK)
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
 
 response = client.chat.completions.create(
-    model="duckhunt",
+    model="LiquidAI/LFM2.5-VL-1.6B",
     messages=[...],
     tools=[{
         "type": "function",

@@ -5,10 +5,26 @@ set -euo pipefail
 #  Duck Hunt GRPO Training — Launch Script
 # ===================================================================
 #
+#  Supports all model families (Mistral, LiquidAI, etc.) via --config.
+#
 #  Usage:
-#    ./run_training.sh                    # TRL mode (default)
-#    ./run_training.sh --custom           # Custom GRPO loop
-#    ./run_training.sh --custom --resume outputs/ministral_duckhunt_grpo/checkpoint-500
+#    # Mistral (default)
+#    ./run_training.sh
+#    ./run_training.sh --config configs/ministral_config.yaml
+#
+#    # LiquidAI with LoRA
+#    ./run_training.sh --config configs/liquidai_config.yaml
+#
+#    # LiquidAI full fine-tune (no LoRA)
+#    ./run_training.sh --config configs/liquidai_nolora_config.yaml
+#
+#    # Custom GRPO loop
+#    ./run_training.sh --config configs/liquidai_config.yaml --custom
+#
+#    # Resume from checkpoint
+#    ./run_training.sh --custom --resume outputs/lfm25_duckhunt_grpo/checkpoint-500
+#
+#    # Push to Hub
 #    ./run_training.sh --push-to-hub --hub-model-id user/duckhunt-grpo
 #
 
@@ -72,9 +88,9 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --config PATH         Config YAML (default: configs/ministral_config.yaml)"
             echo "  --custom              Use custom GRPO loop instead of TRL"
             echo "  --resume PATH         Resume from checkpoint (custom mode only)"
-            echo "  --config PATH         Config YAML (default: configs/ministral_config.yaml)"
             echo "  --num-samples N       Training samples to generate (default: 1000, TRL only)"
             echo "  --wandb-project NAME  W&B project name (default: duckhunt-grpo)"
             echo "  --override KEY=VAL    Override config value (repeatable)"
@@ -82,6 +98,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --push-to-hub         Push final model to Hugging Face Hub"
             echo "  --hub-model-id ID     HF repo id (e.g. user/duckhunt-grpo)"
             echo "  -h, --help            Show this help"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --config configs/ministral_config.yaml           # Mistral + LoRA"
+            echo "  $0 --config configs/liquidai_config.yaml            # LiquidAI + LoRA"
+            echo "  $0 --config configs/liquidai_nolora_config.yaml     # LiquidAI full fine-tune"
+            echo "  $0 --config configs/liquidai_config.yaml --custom   # LiquidAI custom loop"
             exit 0
             ;;
         *)
@@ -111,12 +133,19 @@ mkdir -p outputs
 # -------------------------------------------------------------------
 #  Launch training
 # -------------------------------------------------------------------
+
+# Extract model name from config for display
+MODEL_NAME=$(grep 'model_name:' "$CONFIG" 2>/dev/null | head -1 | sed 's/.*: *"\?\([^"]*\)"\?/\1/' || echo "unknown")
+LORA_STATUS=$(grep -q 'enabled: true' "$CONFIG" 2>/dev/null && echo 'yes' || echo 'no')
+
 echo ""
 echo "============================================================"
 echo "  Duck Hunt GRPO Training"
 echo "============================================================"
-echo "  Mode:        $MODE"
+echo "  Model:       $MODEL_NAME"
 echo "  Config:      $CONFIG"
+echo "  Mode:        $MODE"
+echo "  LoRA:        $LORA_STATUS"
 if [ "$MODE" = "trl" ]; then
     echo "  Samples:     $NUM_SAMPLES"
 fi
