@@ -20,17 +20,28 @@ MAX_MISSES = 4  # Game over threshold
 # DUCK
 HITBOX_WIDTH = 81
 HITBOX_HEIGHT = 75
-SPEED_BASE = 4  # Minimum speed component
-SPEED_VARIANCE = 2  # Added to base
+SPEED_BASE = 6  # Minimum speed component (was 4 — faster ducks)
+SPEED_VARIANCE = 4  # Added to base (was 2 — wider speed range)
 # Speed = BASE+round to BASE+VARIANCE+round
+# Round 1: 7–11 px/frame (was 5–7)
+
+# SPAWN (ducks always enter from off-screen edges)
+SPAWN_Y_MIN_FRAC = 0.3   # normalised min Y for spawn height
+SPAWN_Y_MAX_FRAC = 0.85  # normalised max Y for spawn height (avoid dog area)
+
+# MID-FLIGHT JITTER (makes trajectories less predictable)
+JITTER_CHANCE = 0.03     # probability per frame of a direction nudge
+JITTER_DX_RANGE = 1.0    # max dx perturbation (px/frame)
+JITTER_DY_RANGE = 1.0    # max dy perturbation (px/frame)
 
 # BOUNCE
-BOUNCE_DY_MIN = -4
-BOUNCE_DY_MAX = 4
+BOUNCE_DY_MIN = -5       # was -4
+BOUNCE_DY_MAX = 5        # was 4
 BOUNCE_TOP_DY_MIN = 2
-BOUNCE_TOP_DY_MAX = 4
-BOUNCE_BOTTOM_DY_MIN = -4
+BOUNCE_TOP_DY_MAX = 5    # was 4
+BOUNCE_BOTTOM_DY_MIN = -5  # was -4
 BOUNCE_BOTTOM_DY_MAX = -2
+BOUNCE_SPEED_JITTER = 0.15  # ±15% speed variation on bounce
 
 # OPENENV SPECIFIC
 FRAME_OUTPUT_SIZE = (512, 512)  # Resized for VLM
@@ -38,7 +49,7 @@ FRAMES_PER_OBSERVATION = 4  # Number of frames per observation (default)
 FRAMES_PER_OBSERVATION_MIN = 2  # Minimum frames for random range
 FRAMES_PER_OBSERVATION_MAX = 6  # Maximum frames for random range
 MAX_HORIZON = 30  # Maximum horizon VLM can use
-LATENCY_OPTIONS_MS = [100, 200, 300, 400, 500, 600]
+LATENCY_OPTIONS_MS = [50, 100, 200, 400, 600]
 
 # REWARDS
 REWARD_HIT = 1.0

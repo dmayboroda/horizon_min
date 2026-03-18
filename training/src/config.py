@@ -104,6 +104,10 @@ class GRPOConfig:
     # Entropy bonus (prevents mode collapse)
     entropy_coeff: float = 0.01  # weight for entropy bonus in loss
 
+    # Entropy floor (emergency brake against collapse)
+    entropy_floor: float = 0.0       # 0 = disabled; if entropy < floor, extra penalty
+    entropy_floor_coeff: float = 0.5  # strength of the floor penalty
+
     # vLLM (disabled by default for small-scale)
     use_vllm: bool = False
 

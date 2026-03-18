@@ -10,12 +10,18 @@ from config import (
     HITBOX_HEIGHT,
     SPEED_BASE,
     SPEED_VARIANCE,
+    SPAWN_Y_MIN_FRAC,
+    SPAWN_Y_MAX_FRAC,
+    JITTER_CHANCE,
+    JITTER_DX_RANGE,
+    JITTER_DY_RANGE,
     BOUNCE_DY_MIN,
     BOUNCE_DY_MAX,
     BOUNCE_TOP_DY_MIN,
     BOUNCE_TOP_DY_MAX,
     BOUNCE_BOTTOM_DY_MIN,
     BOUNCE_BOTTOM_DY_MAX,
+    BOUNCE_SPEED_JITTER,
     BULLETS_PER_MATCH,
     MATCH_DURATION_FRAMES,
     MATCHES_PER_ROUND,
@@ -33,24 +39,23 @@ class Duck:
     """A duck that flies around and can be shot."""
 
     def __init__(self, round_number: int):
-        # Random spawn position (left or right edge, bottom half)
-        spawn_left = random.choice([True, False])
-        if spawn_left:
-            self.x = 0
-        else:
-            self.x = SCREEN_WIDTH
-
-        self.y = random.randint(SCREEN_HEIGHT // 2, SCREEN_HEIGHT - HITBOX_HEIGHT)
-
         # Speed based on round number
         speed_range = range(SPEED_BASE + round_number, SPEED_BASE + SPEED_VARIANCE + round_number)
         speed = random.choice(list(speed_range))
 
-        # Initial direction (move toward center)
+        # Spawn off-screen from left or right edge, random Y height
+        spawn_left = random.choice([True, False])
         if spawn_left:
+            self.x = -HITBOX_WIDTH  # just off left edge
             self.dx = speed
         else:
+            self.x = SCREEN_WIDTH  # just off right edge
             self.dx = -speed
+
+        # Random Y within playable range
+        y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
+        y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - HITBOX_HEIGHT
+        self.y = random.randint(y_min, max(y_min, y_max))
 
         self.dy = random.randint(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
         # Ensure dy is not 0
@@ -80,6 +85,12 @@ class Duck:
     def update(self, round_number: int):
         """Update duck position and state."""
         if self.state == DuckState.FLYING:
+            # Mid-flight jitter — small random direction nudge
+            if JITTER_CHANCE > 0 and random.random() < JITTER_CHANCE:
+                self.dx += random.uniform(-JITTER_DX_RANGE, JITTER_DX_RANGE)
+                self.dy += random.uniform(-JITTER_DY_RANGE, JITTER_DY_RANGE)
+                self._update_sprite_dir()
+
             self.x += self.dx
             self.y += self.dy
             self._check_boundaries(round_number)
@@ -89,9 +100,11 @@ class Duck:
             self.y += 4  # Fall straight down
 
     def _check_boundaries(self, round_number: int):
-        """Check boundaries and apply bounce logic."""
+        """Check boundaries and apply bounce logic with speed jitter."""
         speed_range = range(SPEED_BASE + round_number, SPEED_BASE + SPEED_VARIANCE + round_number)
         speed = random.choice(list(speed_range))
+        # Apply ±jitter to bounce speed
+        speed *= random.uniform(1.0 - BOUNCE_SPEED_JITTER, 1.0 + BOUNCE_SPEED_JITTER)
         coin_toss = random.choice([-1, 1])
 
         # Left edge

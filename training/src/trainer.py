@@ -450,12 +450,24 @@ class DuckHuntGRPOTrainer:
 
         total_loss = total_loss / max(G, 1)
 
+        # --- 7. Entropy floor penalty (emergency brake) ---
+        mean_entropy = total_entropy / max(G, 1)
+        entropy_floor_penalty = 0.0
+        if grpo.entropy_floor > 0 and mean_entropy < grpo.entropy_floor:
+            entropy_floor_penalty = grpo.entropy_floor_coeff * (grpo.entropy_floor - mean_entropy)
+            total_loss = total_loss + entropy_floor_penalty
+            logger.warning(
+                "Entropy below floor: %.2f < %.2f, adding penalty %.4f",
+                mean_entropy, grpo.entropy_floor, entropy_floor_penalty,
+            )
+
         metrics = {
             "loss": total_loss.item(),
             "mean_reward": mean_r.item(),
             "std_reward": std_r.item(),
             "mean_kl": total_kl / max(G, 1),
-            "mean_entropy": total_entropy / max(G, 1),
+            "mean_entropy": mean_entropy,
+            "entropy_floor_penalty": entropy_floor_penalty,
             "advantages_mean": advantages.mean().item(),
         }
 
