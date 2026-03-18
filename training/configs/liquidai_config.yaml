@@ -31,8 +31,8 @@ model:
 
 lora:
   enabled: true
-  r: 32
-  lora_alpha: 64
+  r: 16
+  lora_alpha: 32
   lora_dropout: 0.0
   target_modules:
     - q_proj
