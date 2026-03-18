@@ -31,8 +31,8 @@ model:
 
 lora:
   enabled: true
-  r: 16
-  lora_alpha: 16
+  r: 32
+  lora_alpha: 64
   lora_dropout: 0.0
   target_modules:
     - q_proj
@@ -49,15 +49,15 @@ lora:
 grpo:
   num_generations: 6
   max_completion_length: 128
-  temperature: 1.2                         # more exploration
+  temperature: 1.0                         # more exploration
   top_p: 0.95
   top_k: 0
-  beta: 0.04                              # KL penalty — anchor to reference model
+  beta: 0.01                               # KL penalty — anchor to reference model
   num_iterations: 1
   epsilon: 0.2
   loss_type: "grpo"
   scale_rewards: "group"
-  entropy_coeff: 0.05                      # 5x stronger entropy bonus
+  entropy_coeff: 0.02
   entropy_floor: 1.0                       # emergency brake if entropy drops below 1.0
   entropy_floor_coeff: 0.5                 # strength of floor penalty
   use_vllm: false
@@ -68,8 +68,8 @@ training:
   max_steps: -1
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 4
-  learning_rate: 5.0e-6                    # conservative LR for stable GRPO
-  warmup_ratio: 0.1                        # longer warmup
+  learning_rate: 1.0e-5                    # conservative LR for stable GRPO
+  warmup_ratio: 0.05                       # longer warmup
   weight_decay: 0.01
   lr_scheduler_type: "cosine"
   max_grad_norm: 1.0
