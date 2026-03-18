@@ -332,10 +332,13 @@ class LiquidAIFormat(ModelFormat):
             return _build_action(vals["x"], vals["y"], vals.get("horizon", "0"), max_horizon)
 
         # Fallback: positional args: shoot(0.5, 0.3, 8)
-        nums = re.findall(r"[0-9.eE+-]+", args_str)
+        nums = re.findall(r"\d+\.?\d*(?:[eE][+-]?\d+)?", args_str)
         if len(nums) >= 2:
             horizon = nums[2] if len(nums) >= 3 else "0"
-            return _build_action(nums[0], nums[1], horizon, max_horizon)
+            try:
+                return _build_action(nums[0], nums[1], horizon, max_horizon)
+            except (ValueError, TypeError):
+                pass
 
         return None
 
