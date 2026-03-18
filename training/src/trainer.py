@@ -380,13 +380,11 @@ class DuckHuntGRPOTrainer:
         mean_r = rewards_t.mean()
         std_r = rewards_t.std()
         if std_r < 1e-8:
-            # All rewards identical — use running baseline so the model
-            # still gets a gradient signal (REINFORCE-style).
-            advantages = rewards_t - self._reward_baseline
+            # All rewards identical — no gradient signal possible.
+            # Return zeros to avoid NaN and prevent spurious updates.
+            advantages = torch.zeros_like(rewards_t)
         else:
-            advantages = (rewards_t - mean_r) / std_r
-        # Update running baseline (exponential moving average)
-        self._reward_baseline = 0.95 * self._reward_baseline + 0.05 * mean_r.item()
+            advantages = (rewards_t - mean_r) / (std_r + 1e-8)
         advantages = advantages.to(self.device)
 
         total_loss = torch.tensor(0.0, device=self.device)
