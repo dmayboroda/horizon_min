@@ -9,6 +9,9 @@ Each model family (Mistral, LiquidAI, …) has a different:
 The shared pieces (system prompt, Action, _build_action, JSON/kv fallbacks)
 live in ``utils.py``.  This module provides a ``ModelFormat`` interface and
 a ``get_format(model_name)`` factory that auto-detects the right one.
+
+Few-shot examples use **randomized values** to prevent the model from
+memorizing a single response.
 """
 
 from __future__ import annotations
@@ -30,6 +33,20 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ===================================================================
+#  Random few-shot values (prevent memorization)
+# ===================================================================
+def _random_fewshot_values() -> tuple[float, float, int]:
+    """Generate random x, y, horizon for few-shot examples.
+
+    Values change every prompt so the model can't memorize a fixed answer.
+    """
+    x = round(random.uniform(0.1, 0.9), 2)
+    y = round(random.uniform(0.1, 0.7), 2)
+    horizon = random.randint(2, 20)
+    return x, y, horizon
 
 
 # ===================================================================
@@ -164,13 +181,16 @@ class MistralFormat(ModelFormat):
         },
     }
 
-    FEW_SHOT_EXAMPLE = (
-        '[TOOL_CALLS] [{"name": "shoot", "arguments": '
-        '{"x": 0.45, "y": 0.25, "horizon": 8}, "id": "abc123xyz"}]'
-    )
-
     def get_tools(self) -> list[dict]:
         return [self.TOOL_SCHEMA]
+
+    def _make_fewshot(self) -> str:
+        x, y, h = _random_fewshot_values()
+        call_id = "".join(random.choices(_CALL_ID_CHARS, k=9))
+        return (
+            f'[TOOL_CALLS] [{{"name": "shoot", "arguments": '
+            f'{{"x": {x}, "y": {y}, "horizon": {h}}}, "id": "{call_id}"}}]'
+        )
 
     def build_prompt(self, frames, state, num_frames=None):
         if num_frames is None:
@@ -187,7 +207,7 @@ class MistralFormat(ModelFormat):
                 "Frame sequence: 4 frames. Ducks flying: 2. "
                 "Latency: 6 frames. Call the shoot tool now."
             )}]},
-            {"role": "assistant", "content": [{"type": "text", "text": self.FEW_SHOT_EXAMPLE}]},
+            {"role": "assistant", "content": [{"type": "text", "text": self._make_fewshot()}]},
             {"role": "user", "content": user_content},
         ]
         return messages, self.get_tools()
@@ -268,10 +288,12 @@ class LiquidAIFormat(ModelFormat):
         },
     }
 
-    FEW_SHOT_EXAMPLE = "<|tool_call_start|>[shoot(x=0.45, y=0.25, horizon=8)]<|tool_call_end|>"
-
     def get_tools(self) -> list[dict]:
         return [self.TOOL_SCHEMA]
+
+    def _make_fewshot(self) -> str:
+        x, y, h = _random_fewshot_values()
+        return f"<|tool_call_start|>[shoot(x={x}, y={y}, horizon={h})]<|tool_call_end|>"
 
     def build_prompt(self, frames, state, num_frames=None):
         if num_frames is None:
@@ -288,7 +310,7 @@ class LiquidAIFormat(ModelFormat):
                 "Frame sequence: 4 frames. Ducks flying: 2. "
                 "Latency: 5 frames. Call the shoot tool now."
             )}]},
-            {"role": "assistant", "content": [{"type": "text", "text": self.FEW_SHOT_EXAMPLE}]},
+            {"role": "assistant", "content": [{"type": "text", "text": self._make_fewshot()}]},
             {"role": "user", "content": user_content},
         ]
         return messages, self.get_tools()
