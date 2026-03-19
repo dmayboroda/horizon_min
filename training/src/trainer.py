@@ -18,6 +18,8 @@ import copy
 import json
 import logging
 import random
+
+from PIL import Image
 import shutil
 from pathlib import Path
 
@@ -351,8 +353,16 @@ class DuckHuntGRPOTrainer:
                 i, reward, action_str, hit_str, decoded,
             )
 
+        # Collect parsed actions for W&B visualization
+        parsed_actions = []
+        for i in range(G):
+            decoded = completions_text[i]
+            parsed_actions.append(
+                parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
+            )
+
         # Log frames and completions to W&B
-        self._log_batch_to_wandb(frames, completions_text, rewards)
+        self._log_batch_to_wandb(frames, completions_text, rewards, parsed_actions)
 
         # Advance the real environment
         self.env.advance_frames(10)
@@ -510,24 +520,128 @@ class DuckHuntGRPOTrainer:
     # ------------------------------------------------------------------
     #  Logging
     # ------------------------------------------------------------------
+    # Crosshair sprite (loaded once, shared across instances)
+    _crosshair_sprite: Image.Image | None = None
+
+    @classmethod
+    def _get_crosshair_sprite(cls) -> Image.Image:
+        """Load the crosshair sprite from assets (cached)."""
+        if cls._crosshair_sprite is None:
+            from pathlib import Path
+            assets = Path(__file__).resolve().parent.parent.parent / "duck_hunt_openenv" / "assets"
+            sprite_path = assets / "crosshairs.png"
+            cls._crosshair_sprite = Image.open(sprite_path).convert("RGBA")
+        return cls._crosshair_sprite
+
+    @staticmethod
+    def _draw_crosshair(
+        frame: Image.Image,
+        x_norm: float,
+        y_norm: float,
+        color: tuple = (255, 0, 0),
+        label: str | None = None,
+    ) -> Image.Image:
+        """Draw a crosshair sprite on a copy of the frame at normalised (x, y)."""
+        from PIL import ImageDraw, ImageChops
+
+        img = frame.copy().convert("RGBA")
+        w, h = img.size
+        cx = int(x_norm * w)
+        cy = int(y_norm * h)
+
+        # Get crosshair sprite and tint it
+        raw = DuckHuntGRPOTrainer._get_crosshair_sprite()
+        # Scale crosshair to ~8% of frame width
+        ch_size = max(24, w // 12)
+        sprite = raw.resize((ch_size, ch_size), Image.LANCZOS)
+
+        # Tint the sprite: replace non-transparent pixels with the color
+        r_ch, g_ch, b_ch, a_ch = sprite.split()
+        tinted = Image.merge("RGBA", (
+            r_ch.point(lambda _: color[0]),
+            g_ch.point(lambda _: color[1]),
+            b_ch.point(lambda _: color[2]),
+            a_ch,
+        ))
+
+        # Paste centered on (cx, cy)
+        paste_x = cx - ch_size // 2
+        paste_y = cy - ch_size // 2
+        img.paste(tinted, (paste_x, paste_y), tinted)
+
+        # Label text
+        if label:
+            draw = ImageDraw.Draw(img)
+            draw.text(
+                (cx + ch_size // 2 + 4, cy - 8),
+                label, fill=color + (255,),
+            )
+
+        return img.convert("RGB")
+
     def _log_batch_to_wandb(
         self,
         frames: list,
         completions: list[str],
         rewards: list[float],
+        actions: list | None = None,
     ) -> None:
-        """Log observation frames and full completions to W&B."""
+        """Log observation frames (with crosshairs) and completions to W&B."""
         if not self._wandb_active or wandb.run is None:
             return
 
         log_dict: dict = {}
 
-        # Log observation frames as images
+        # Log raw observation frames
         wandb_images = []
         for i, frame in enumerate(frames):
             wandb_images.append(wandb.Image(frame, caption=f"frame_{i}"))
         if wandb_images:
             log_dict["train/observation_frames"] = wandb_images
+
+        # Log last frame with crosshairs for each valid action
+        if actions and frames:
+            last_frame = frames[-1]  # most recent frame
+            colors = [
+                (255, 0, 0),    # red
+                (0, 255, 0),    # green
+                (0, 100, 255),  # blue
+                (255, 255, 0),  # yellow
+                (255, 0, 255),  # magenta
+                (0, 255, 255),  # cyan
+            ]
+            shot_images = []
+            for i, action in enumerate(actions):
+                if action is not None:
+                    color = colors[i % len(colors)]
+                    hit_str = "hit" if rewards[i] > 0 else "miss"
+                    label = f"g{i} h={action.horizon} {hit_str} r={rewards[i]:.2f}"
+                    annotated = self._draw_crosshair(
+                        last_frame, action.x, action.y,
+                        color=color, label=label,
+                    )
+                    shot_images.append(wandb.Image(
+                        annotated,
+                        caption=f"gen{i}: ({action.x:.2f},{action.y:.2f}) h={action.horizon} {hit_str}",
+                    ))
+            if shot_images:
+                log_dict["train/shot_predictions"] = shot_images
+
+            # Also log a single combined image with ALL crosshairs
+            if any(a is not None for a in actions):
+                combined = last_frame.copy().convert("RGB")
+                for i, action in enumerate(actions):
+                    if action is not None:
+                        color = colors[i % len(colors)]
+                        hit_str = "hit" if rewards[i] > 0 else "miss"
+                        label = f"g{i} h={action.horizon}"
+                        combined = self._draw_crosshair(
+                            combined, action.x, action.y,
+                            color=color, label=label,
+                        )
+                log_dict["train/all_shots_overlay"] = wandb.Image(
+                    combined, caption="All generation predictions",
+                )
 
         # Log completions as a table
         comp_table = wandb.Table(columns=["gen_idx", "completion", "reward"])
