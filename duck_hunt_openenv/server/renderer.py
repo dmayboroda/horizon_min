@@ -10,17 +10,17 @@ from config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
     FRAME_OUTPUT_SIZE,
-    HITBOX_WIDTH,
-    HITBOX_HEIGHT,
+    SPRITE_WIDTH,
+    SPRITE_HEIGHT,
 )
 
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 
 # Sprite sheet layout (from original duck.py)
-# All measurements in pixels
-FRAME_W = HITBOX_WIDTH   # 81
-FRAME_H = HITBOX_HEIGHT  # 75
+# All measurements in pixels — uses sprite size, NOT hitbox
+FRAME_W = SPRITE_WIDTH   # 81
+FRAME_H = SPRITE_HEIGHT  # 75
 
 # Duck sprite positions in sprite sheet
 # Using black/green duck (middle column in each row)

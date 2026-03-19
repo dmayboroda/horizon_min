@@ -9,6 +9,7 @@ from config import (
     SCREEN_HEIGHT,
     FRAMES_PER_OBSERVATION,
     FRAME_OUTPUT_SIZE,
+    FRAME_SKIP,
     LATENCY_OPTIONS_MS,
     FPS,
     MAX_HORIZON,
@@ -60,14 +61,16 @@ class DuckHuntEnvironment:
         # Clear frame buffer
         self.frame_buffer = []
 
-        # Render initial frames
-        for _ in range(FRAMES_PER_OBSERVATION):
+        # Render initial frames (with skip for visible duck displacement)
+        for i in range(FRAMES_PER_OBSERVATION):
             game_state = self.round.current_match.get_state()
             image = self.renderer.render_and_resize(game_state, self.frame_counter)
             frame_b64 = self.renderer.image_to_base64(image)
             self.frame_buffer.append(frame_b64)
-            self.round.current_match.advance_frames(1)
-            self.frame_counter += 1
+            # Advance by FRAME_SKIP between captures (1 after last to not waste frames)
+            advance = FRAME_SKIP if i < FRAMES_PER_OBSERVATION - 1 else 1
+            self.round.current_match.advance_frames(advance)
+            self.frame_counter += advance
 
         # Build observation
         return self._build_observation(
@@ -215,13 +218,14 @@ class DuckHuntEnvironment:
         return REWARD_MISS
 
     def _update_frame_buffer(self):
-        """Render new frames and update buffer."""
+        """Render new frames and update buffer (with skip for visible displacement)."""
         self.frame_buffer = []
 
-        for _ in range(FRAMES_PER_OBSERVATION):
+        for i in range(FRAMES_PER_OBSERVATION):
             game_state = self.round.current_match.get_state()
             image = self.renderer.render_and_resize(game_state, self.frame_counter)
             frame_b64 = self.renderer.image_to_base64(image)
             self.frame_buffer.append(frame_b64)
-            self.round.current_match.advance_frames(1)
-            self.frame_counter += 1
+            advance = FRAME_SKIP if i < FRAMES_PER_OBSERVATION - 1 else 1
+            self.round.current_match.advance_frames(advance)
+            self.frame_counter += advance

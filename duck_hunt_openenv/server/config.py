@@ -18,8 +18,13 @@ BULLETS_PER_MATCH = 3
 MAX_MISSES = 4  # Game over threshold
 
 # DUCK
-HITBOX_WIDTH = 81
-HITBOX_HEIGHT = 75
+# Sprite dimensions (fixed — must match sprite sheet)
+SPRITE_WIDTH = 81
+SPRITE_HEIGHT = 75
+
+# Hit detection box (smaller than sprite — forces precise aiming)
+HITBOX_WIDTH = 40   # ~5% of screen width (was 81 = full sprite)
+HITBOX_HEIGHT = 36  # ~7% of screen height (was 75 = full sprite)
 SPEED_BASE = 6  # Minimum speed component (was 4 — faster ducks)
 SPEED_VARIANCE = 4  # Added to base (was 2 — wider speed range)
 # Speed = BASE+round to BASE+VARIANCE+round
@@ -48,6 +53,9 @@ FRAME_OUTPUT_SIZE = (512, 512)  # Resized for VLM
 FRAMES_PER_OBSERVATION = 4  # Number of frames per observation (default)
 FRAMES_PER_OBSERVATION_MIN = 2  # Minimum frames for random range
 FRAMES_PER_OBSERVATION_MAX = 6  # Maximum frames for random range
+FRAME_SKIP = 3  # Game frames to skip between observation frames
+                 # e.g. skip=3 means capture every 3rd frame
+                 # With 4 obs frames: spans 4*3=12 game frames of duck movement
 MAX_HORIZON = 30  # Maximum horizon VLM can use
 LATENCY_OPTIONS_MS = [50, 100, 200, 400, 600]
 

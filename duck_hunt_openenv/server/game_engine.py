@@ -6,6 +6,8 @@ from enum import Enum
 from config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
+    SPRITE_WIDTH,
+    SPRITE_HEIGHT,
     HITBOX_WIDTH,
     HITBOX_HEIGHT,
     SPEED_BASE,
@@ -46,7 +48,7 @@ class Duck:
         # Spawn off-screen from left or right edge, random Y height
         spawn_left = random.choice([True, False])
         if spawn_left:
-            self.x = -HITBOX_WIDTH  # just off left edge
+            self.x = -SPRITE_WIDTH  # just off left edge
             self.dx = speed
         else:
             self.x = SCREEN_WIDTH  # just off right edge
@@ -54,7 +56,7 @@ class Duck:
 
         # Random Y within playable range
         y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
-        y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - HITBOX_HEIGHT
+        y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
         self.y = random.randint(y_min, max(y_min, y_max))
 
         self.dy = random.randint(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
@@ -116,7 +118,7 @@ class Duck:
             self._update_sprite_dir()
 
         # Right edge
-        elif self.x >= SCREEN_WIDTH - HITBOX_WIDTH:
+        elif self.x >= SCREEN_WIDTH - SPRITE_WIDTH:
             self.dx = -speed
             self.dy = random.randint(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
             if self.dy == 0:
@@ -137,18 +139,24 @@ class Duck:
 
     def _check_escaped(self):
         """Check if duck escaped off top of screen."""
-        if self.y + HITBOX_HEIGHT < 0:
+        if self.y + SPRITE_HEIGHT < 0:
             self.state = DuckState.ESCAPED
 
     def check_hit(self, target_x: int, target_y: int) -> bool:
-        """Check if target coordinates hit this duck."""
+        """Check if target coordinates hit this duck.
+
+        The hitbox is centered on the sprite (smaller than the sprite itself).
+        """
         if self.state != DuckState.FLYING:
             return False
 
-        # Hitbox check (hitbox is at duck position with size HITBOX_WIDTH x HITBOX_HEIGHT)
-        if target_x < self.x or target_x > self.x + HITBOX_WIDTH:
+        # Center the hitbox on the sprite
+        hx = self.x + (SPRITE_WIDTH - HITBOX_WIDTH) // 2
+        hy = self.y + (SPRITE_HEIGHT - HITBOX_HEIGHT) // 2
+
+        if target_x < hx or target_x > hx + HITBOX_WIDTH:
             return False
-        if target_y < self.y or target_y > self.y + HITBOX_HEIGHT:
+        if target_y < hy or target_y > hy + HITBOX_HEIGHT:
             return False
 
         return True
