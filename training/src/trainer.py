@@ -326,6 +326,8 @@ class DuckHuntGRPOTrainer:
         completion_ids_list = []
         rewards = []
         completions_text = []
+        parsed_actions = []
+        hit_flags = []  # True if hit at least one duck
 
         for i in range(G):
             comp_ids = output_ids[i, prompt_len:]
@@ -334,11 +336,15 @@ class DuckHuntGRPOTrainer:
             decoded = self.processor.decode(comp_ids, skip_special_tokens=False)
             completions_text.append(decoded)
             action = parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
+            parsed_actions.append(action)
 
             if action is not None:
                 result = simulate_shot(snap, action)
             else:
                 result = {"hit_a": False, "hit_b": False, "had_target": True}
+
+            is_hit = result.get("hit_a", False) or result.get("hit_b", False)
+            hit_flags.append(is_hit)
 
             reward = compute_reward(result, action, self.cfg.reward)
             rewards.append(reward)
@@ -353,16 +359,8 @@ class DuckHuntGRPOTrainer:
                 i, reward, action_str, hit_str, decoded,
             )
 
-        # Collect parsed actions for W&B visualization
-        parsed_actions = []
-        for i in range(G):
-            decoded = completions_text[i]
-            parsed_actions.append(
-                parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
-            )
-
         # Log frames and completions to W&B
-        self._log_batch_to_wandb(frames, completions_text, rewards, parsed_actions)
+        self._log_batch_to_wandb(frames, completions_text, rewards, parsed_actions, hit_flags)
 
         # Advance the real environment
         self.env.advance_frames(10)
@@ -585,6 +583,7 @@ class DuckHuntGRPOTrainer:
         completions: list[str],
         rewards: list[float],
         actions: list | None = None,
+        hit_flags: list[bool] | None = None,
     ) -> None:
         """Log observation frames (with crosshairs) and completions to W&B."""
         if not self._wandb_active or wandb.run is None:
@@ -599,54 +598,56 @@ class DuckHuntGRPOTrainer:
         if wandb_images:
             log_dict["train/observation_frames"] = wandb_images
 
-        # Log last frame with crosshairs for each valid action
-        if actions and frames:
-            last_frame = frames[-1]  # most recent frame
-            colors = [
-                (255, 0, 0),    # red
-                (0, 255, 0),    # green
-                (0, 100, 255),  # blue
-                (255, 255, 0),  # yellow
-                (255, 0, 255),  # magenta
-                (0, 255, 255),  # cyan
-            ]
-            shot_images = []
-            for i, action in enumerate(actions):
-                if action is not None:
-                    color = colors[i % len(colors)]
-                    hit_str = "hit" if rewards[i] > 0 else "miss"
-                    label = f"g{i} h={action.horizon} {hit_str} r={rewards[i]:.2f}"
-                    annotated = self._draw_crosshair(
-                        last_frame, action.x, action.y,
-                        color=color, label=label,
-                    )
-                    shot_images.append(wandb.Image(
-                        annotated,
-                        caption=f"gen{i}: ({action.x:.2f},{action.y:.2f}) h={action.horizon} {hit_str}",
-                    ))
-            if shot_images:
-                log_dict["train/shot_predictions"] = shot_images
+        if actions and frames and hit_flags:
+            last_frame = frames[-1]
+            hit_color = (0, 255, 0)    # green for hits
+            miss_color = (255, 0, 0)   # red for misses
 
-            # Also log a single combined image with ALL crosshairs
+            hit_images = []
+            miss_images = []
+
+            for i, (action, is_hit) in enumerate(zip(actions, hit_flags)):
+                if action is None:
+                    continue
+
+                color = hit_color if is_hit else miss_color
+                label = f"g{i} h={action.horizon} r={rewards[i]:.2f}"
+                annotated = self._draw_crosshair(
+                    last_frame, action.x, action.y,
+                    color=color, label=label,
+                )
+                caption = f"gen{i}: ({action.x:.2f},{action.y:.2f}) h={action.horizon} r={rewards[i]:.2f}"
+
+                if is_hit:
+                    hit_images.append(wandb.Image(annotated, caption=caption))
+                else:
+                    miss_images.append(wandb.Image(annotated, caption=caption))
+
+            if hit_images:
+                log_dict["train/hits"] = hit_images
+            if miss_images:
+                log_dict["train/misses"] = miss_images
+
+            # Combined overlay with all shots (green=hit, red=miss)
             if any(a is not None for a in actions):
                 combined = last_frame.copy().convert("RGB")
-                for i, action in enumerate(actions):
+                for i, (action, is_hit) in enumerate(zip(actions, hit_flags)):
                     if action is not None:
-                        color = colors[i % len(colors)]
-                        hit_str = "hit" if rewards[i] > 0 else "miss"
+                        color = hit_color if is_hit else miss_color
                         label = f"g{i} h={action.horizon}"
                         combined = self._draw_crosshair(
                             combined, action.x, action.y,
                             color=color, label=label,
                         )
                 log_dict["train/all_shots_overlay"] = wandb.Image(
-                    combined, caption="All generation predictions",
+                    combined, caption="All shots: green=hit, red=miss",
                 )
 
         # Log completions as a table
-        comp_table = wandb.Table(columns=["gen_idx", "completion", "reward"])
+        comp_table = wandb.Table(columns=["gen_idx", "completion", "reward", "hit"])
         for i, (text, reward) in enumerate(zip(completions, rewards)):
-            comp_table.add_data(i, text, reward)
+            is_hit = hit_flags[i] if hit_flags else False
+            comp_table.add_data(i, text, reward, is_hit)
         log_dict["train/completions"] = comp_table
 
         wandb.log(log_dict)
