@@ -170,6 +170,9 @@ class RewardConfig:
     # Invalid action (unparseable model output)
     invalid_action: float = -1.0
 
+    # Shooting when no ducks are flying at shot time (escaped/fallen during horizon)
+    shoot_dead_duck: float = -0.7
+
     # Distance-based reward shaping (proximity bonus on miss)
     proximity_bonus: float = 0.5  # max bonus when shot is close to duck
     proximity_decay: float = 5.0  # how fast bonus decays with distance

@@ -359,8 +359,15 @@ class DuckHuntGRPOTrainer:
                 i, reward, action_str, hit_str, decoded,
             )
 
+        # Render a "shot-time" frame showing where ducks are when shot lands
+        # Uses the first valid action's latency+horizon to advance the snapshot
+        shot_frame = self._render_shot_frame(snap, parsed_actions)
+
         # Log frames and completions to W&B
-        self._log_batch_to_wandb(frames, completions_text, rewards, parsed_actions, hit_flags)
+        self._log_batch_to_wandb(
+            frames, completions_text, rewards, parsed_actions, hit_flags,
+            shot_frame=shot_frame,
+        )
 
         # Advance the real environment
         self.env.advance_frames(10)
@@ -516,6 +523,64 @@ class DuckHuntGRPOTrainer:
             return None
 
     # ------------------------------------------------------------------
+    #  Shot-time frame rendering
+    # ------------------------------------------------------------------
+    def _render_shot_frame(
+        self, snap: dict, actions: list,
+    ) -> Image.Image | None:
+        """Render the game frame at shot time (after latency + horizon).
+
+        This shows where the ducks ACTUALLY ARE when the shot lands,
+        not where they were when the model saw the input frames.
+        """
+        # Find the first valid action to determine advancement
+        action = next((a for a in actions if a is not None), None)
+        if action is None:
+            return None
+
+        try:
+            from .dataset import _restore_duck, _rng_restore
+            from config import SCREEN_WIDTH, SCREEN_HEIGHT
+            import json
+
+            round_number = snap["round_number"]
+            latency_frames = snap["latency_frames"]
+
+            # Restore RNG and ducks from snapshot
+            _rng_restore(snap["rng_state"])
+            duck_a = _restore_duck(snap["duck_a"], round_number)
+            duck_b = _restore_duck(snap["duck_b"], round_number)
+
+            # Advance by latency + horizon (same as simulate_shot)
+            total_advance = latency_frames + action.horizon
+            for _ in range(total_advance):
+                duck_a.update(round_number)
+                duck_b.update(round_number)
+
+            # Build a game_state dict for the renderer
+            game_state = {
+                "duck_a": {
+                    "x": duck_a.x, "y": duck_a.y,
+                    "state": duck_a.state.value,
+                    "sprite_dir": duck_a.sprite_dir,
+                },
+                "duck_b": {
+                    "x": duck_b.x, "y": duck_b.y,
+                    "state": duck_b.state.value,
+                    "sprite_dir": duck_b.sprite_dir,
+                },
+            }
+
+            # Render using the environment's renderer
+            renderer = self.env._env.renderer
+            frame = renderer.render_and_resize(game_state, total_advance)
+            return frame
+
+        except Exception as e:
+            logger.warning("Failed to render shot frame: %s", e)
+            return None
+
+    # ------------------------------------------------------------------
     #  Logging
     # ------------------------------------------------------------------
     # Crosshair sprite (loaded once, shared across instances)
@@ -584,64 +649,82 @@ class DuckHuntGRPOTrainer:
         rewards: list[float],
         actions: list | None = None,
         hit_flags: list[bool] | None = None,
+        shot_frame: Image.Image | None = None,
     ) -> None:
-        """Log observation frames (with crosshairs) and completions to W&B."""
+        """Log observation frames and shot-time frames with crosshairs to W&B.
+
+        ``frames`` are what the model SAW (input).
+        ``shot_frame`` is where the ducks ARE when the shot lands (after latency+horizon).
+        Crosshairs are drawn on the shot_frame so they align with duck positions.
+        """
         if not self._wandb_active or wandb.run is None:
             return
 
         log_dict: dict = {}
 
-        # Log raw observation frames
+        # Log raw observation frames (what the model saw)
         wandb_images = []
         for i, frame in enumerate(frames):
-            wandb_images.append(wandb.Image(frame, caption=f"frame_{i}"))
+            wandb_images.append(wandb.Image(frame, caption=f"input_frame_{i}"))
         if wandb_images:
             log_dict["train/observation_frames"] = wandb_images
 
-        if actions and frames and hit_flags:
-            last_frame = frames[-1]
-            hit_color = (0, 255, 0)    # green for hits
-            miss_color = (255, 0, 0)   # red for misses
+        if actions and hit_flags:
+            # Use shot_frame (duck positions at shot time) for crosshairs.
+            # Fall back to last input frame if shot_frame rendering failed.
+            base_frame = shot_frame if shot_frame is not None else (frames[-1] if frames else None)
+            if base_frame is None:
+                # No frame to draw on
+                pass
+            else:
+                hit_color = (0, 255, 0)    # green for hits
+                miss_color = (255, 0, 0)   # red for misses
 
-            hit_images = []
-            miss_images = []
+                hit_images = []
+                miss_images = []
 
-            for i, (action, is_hit) in enumerate(zip(actions, hit_flags)):
-                if action is None:
-                    continue
-
-                color = hit_color if is_hit else miss_color
-                label = f"g{i} h={action.horizon} r={rewards[i]:.2f}"
-                annotated = self._draw_crosshair(
-                    last_frame, action.x, action.y,
-                    color=color, label=label,
-                )
-                caption = f"gen{i}: ({action.x:.2f},{action.y:.2f}) h={action.horizon} r={rewards[i]:.2f}"
-
-                if is_hit:
-                    hit_images.append(wandb.Image(annotated, caption=caption))
-                else:
-                    miss_images.append(wandb.Image(annotated, caption=caption))
-
-            if hit_images:
-                log_dict["train/hits"] = hit_images
-            if miss_images:
-                log_dict["train/misses"] = miss_images
-
-            # Combined overlay with all shots (green=hit, red=miss)
-            if any(a is not None for a in actions):
-                combined = last_frame.copy().convert("RGB")
                 for i, (action, is_hit) in enumerate(zip(actions, hit_flags)):
-                    if action is not None:
-                        color = hit_color if is_hit else miss_color
-                        label = f"g{i} h={action.horizon}"
-                        combined = self._draw_crosshair(
-                            combined, action.x, action.y,
-                            color=color, label=label,
-                        )
-                log_dict["train/all_shots_overlay"] = wandb.Image(
-                    combined, caption="All shots: green=hit, red=miss",
-                )
+                    if action is None:
+                        continue
+
+                    color = hit_color if is_hit else miss_color
+                    tag = "HIT" if is_hit else "MISS"
+                    label = f"g{i} h={action.horizon} {tag} r={rewards[i]:.2f}"
+                    annotated = self._draw_crosshair(
+                        base_frame, action.x, action.y,
+                        color=color, label=label,
+                    )
+                    caption = (
+                        f"gen{i}: ({action.x:.2f},{action.y:.2f}) "
+                        f"h={action.horizon} {tag} r={rewards[i]:.2f}"
+                    )
+
+                    if is_hit:
+                        hit_images.append(wandb.Image(annotated, caption=caption))
+                    else:
+                        miss_images.append(wandb.Image(annotated, caption=caption))
+
+                if hit_images:
+                    log_dict["train/hits"] = hit_images
+                if miss_images:
+                    log_dict["train/misses"] = miss_images
+
+                # Combined overlay with all shots on shot-time frame
+                if any(a is not None for a in actions):
+                    combined = base_frame.copy().convert("RGB")
+                    for i, (action, is_hit) in enumerate(zip(actions, hit_flags)):
+                        if action is not None:
+                            color = hit_color if is_hit else miss_color
+                            label = f"g{i} h={action.horizon}"
+                            combined = self._draw_crosshair(
+                                combined, action.x, action.y,
+                                color=color, label=label,
+                            )
+                    frame_type = "shot-time" if shot_frame is not None else "input"
+                    log_dict["train/all_shots_overlay"] = wandb.Image(
+                        combined,
+                        caption=f"All shots on {frame_type} frame: green=hit, red=miss",
+                    )
 
         # Log completions as a table
         comp_table = wandb.Table(columns=["gen_idx", "completion", "reward", "hit"])

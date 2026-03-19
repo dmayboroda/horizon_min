@@ -203,7 +203,8 @@ def simulate_shot(
     duck_a = _restore_duck(snapshot["duck_a"], round_number)
     duck_b = _restore_duck(snapshot["duck_b"], round_number)
 
-    had_target = (
+    # Check if ducks were flying at observation time (before processing)
+    had_target_at_obs = (
         duck_a.state == DuckState.FLYING or duck_b.state == DuckState.FLYING
     )
 
@@ -212,6 +213,11 @@ def simulate_shot(
     for _ in range(total_advance):
         duck_a.update(round_number)
         duck_b.update(round_number)
+
+    # Check duck states AFTER advancing (they might have escaped/fallen)
+    had_target_at_shot = (
+        duck_a.state == DuckState.FLYING or duck_b.state == DuckState.FLYING
+    )
 
     # Convert normalised coords → pixels
     pixel_x = int(action.x * SCREEN_WIDTH)
@@ -225,8 +231,12 @@ def simulate_shot(
     duck_b_norm = (duck_b.x / SCREEN_WIDTH, duck_b.y / SCREEN_HEIGHT)
 
     return {
-        "hit_a": hit_a, "hit_b": hit_b, "had_target": had_target,
+        "hit_a": hit_a, "hit_b": hit_b,
+        "had_target": had_target_at_obs,
+        "had_target_at_shot": had_target_at_shot,
         "duck_a_pos": duck_a_norm, "duck_b_pos": duck_b_norm,
+        "duck_a_state": duck_a.state.value,
+        "duck_b_state": duck_b.state.value,
         "shot_pos": (action.x, action.y),
     }
 

@@ -26,14 +26,16 @@ def compute_reward(
     Parameters
     ----------
     result : dict
-        Shot outcome from ``DuckHuntEnvWrapper.process_shot()`` or the
-        observation returned by ``step()``.  Expected keys:
+        Shot outcome from ``simulate_shot()``.  Expected keys:
 
         * ``hit_a``  (bool) – duck A was hit
         * ``hit_b``  (bool) – duck B was hit
-        * ``had_target`` (bool) – at least one duck was flying
+        * ``had_target`` (bool) – at least one duck was flying at observation time
+        * ``had_target_at_shot`` (bool) – at least one duck still flying when shot lands
         * ``duck_a_pos`` (tuple) – normalised (x, y) of duck A after advancement
         * ``duck_b_pos`` (tuple) – normalised (x, y) of duck B after advancement
+        * ``duck_a_state`` (str) – state of duck A after advancement
+        * ``duck_b_state`` (str) – state of duck B after advancement
         * ``shot_pos`` (tuple) – normalised (x, y) of the shot
     action : Action | None
         The parsed action, or ``None`` if the model's output could not be
@@ -44,7 +46,7 @@ def compute_reward(
     Returns
     -------
     float
-        The total reward (base + horizon penalty + proximity bonus).
+        The total reward.
     """
     # ---- unparseable output ----
     if action is None:
@@ -53,10 +55,15 @@ def compute_reward(
     hit_a: bool = result.get("hit_a", False)
     hit_b: bool = result.get("hit_b", False)
     had_target: bool = result.get("had_target", False)
+    had_target_at_shot: bool = result.get("had_target_at_shot", had_target)
 
-    # ---- no ducks were flying ----
+    # ---- no ducks were flying at observation time ----
     if not had_target:
         return config.shoot_nothing
+
+    # ---- ducks escaped/fell during latency+horizon (shot too late) ----
+    if not had_target_at_shot and not (hit_a or hit_b):
+        return config.shoot_dead_duck
 
     # ---- base reward by outcome ----
     if hit_a and hit_b:
@@ -66,7 +73,7 @@ def compute_reward(
     else:
         base = config.miss
 
-    # ---- horizon penalty (only on hits) ----
+    # ---- horizon penalty (only on hits — reward minimizing horizon) ----
     if hit_a or hit_b:
         penalty = config.lambda_horizon * (
             action.horizon / max(config.max_horizon, 1)
@@ -84,8 +91,6 @@ def compute_reward(
             dist_a = _distance(shot_pos, duck_a_pos)
             dist_b = _distance(shot_pos, duck_b_pos)
             min_dist = min(dist_a, dist_b)
-            # Exponential decay: close shots get high bonus, far shots get ~0
-            # At dist=0: bonus=proximity_bonus, at dist=0.3: bonus≈proximity_bonus*0.22
             proximity = config.proximity_bonus * math.exp(
                 -config.proximity_decay * min_dist
             )
