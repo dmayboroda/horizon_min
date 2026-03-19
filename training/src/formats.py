@@ -121,15 +121,18 @@ class ModelFormat(ABC):
     def _try_kv_fallback(self, output_text: str, max_horizon: int) -> Action | None:
         """Shared fallback: x=0.3, y=0.2, horizon=5."""
         kv_match = re.search(
-            r"x\s*[=:]\s*([0-9.eE+-]+).*?"
-            r"y\s*[=:]\s*([0-9.eE+-]+).*?"
-            r"horizon\s*[=:]\s*([0-9]+)",
+            r"x\s*[=:]\s*(\d+\.?\d*(?:[eE][+-]?\d+)?).*?"
+            r"y\s*[=:]\s*(\d+\.?\d*(?:[eE][+-]?\d+)?).*?"
+            r"horizon\s*[=:]\s*(\d+)",
             output_text, re.DOTALL | re.IGNORECASE,
         )
         if kv_match:
-            return _build_action(
-                kv_match.group(1), kv_match.group(2), kv_match.group(3), max_horizon,
-            )
+            try:
+                return _build_action(
+                    kv_match.group(1), kv_match.group(2), kv_match.group(3), max_horizon,
+                )
+            except (ValueError, TypeError):
+                pass
         return None
 
 
