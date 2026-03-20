@@ -48,7 +48,7 @@ lora:
 
 grpo:
   num_generations: 6
-  max_completion_length: 128
+  max_completion_length: 40                # ~25 tokens for clean tool call + small buffer
   temperature: 1.0                         # more exploration
   top_p: 0.95
   top_k: 0
