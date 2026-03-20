@@ -119,6 +119,12 @@ class DuckHuntGRPOTrainer:
         self._total_hits = 0
         self._total_shots = 0
 
+        # Hotspot detection — track recent shot positions to penalize repetition
+        self._recent_shots: list[tuple[float, float]] = []
+        self._hotspot_window: int = 50  # track last N shots
+        self._hotspot_penalty: float = 0.5  # reward multiplier when hotspot detected
+        self._hotspot_radius: float = 0.08  # normalized distance threshold
+
         # Sample outputs buffer for W&B table logging
         self._sample_outputs: list[dict] = []
 
@@ -347,7 +353,30 @@ class DuckHuntGRPOTrainer:
             hit_flags.append(is_hit)
 
             reward = compute_reward(result, action, self.cfg.reward)
+
+            # Hotspot penalty — reduce reward for repetitive coordinates
+            if action is not None and reward > 0:
+                shot_pos = (action.x, action.y)
+                nearby = sum(
+                    1 for sx, sy in self._recent_shots
+                    if abs(sx - shot_pos[0]) < self._hotspot_radius
+                    and abs(sy - shot_pos[1]) < self._hotspot_radius
+                )
+                if nearby > len(self._recent_shots) * 0.3:
+                    # More than 30% of recent shots in the same spot
+                    reward *= self._hotspot_penalty
+                    logger.info(
+                        "  [gen %d] hotspot penalty: %d/%d recent shots near (%.2f, %.2f)",
+                        i, nearby, len(self._recent_shots), shot_pos[0], shot_pos[1],
+                    )
+
             rewards.append(reward)
+
+            # Track shot positions for hotspot detection
+            if action is not None:
+                self._recent_shots.append((action.x, action.y))
+                if len(self._recent_shots) > self._hotspot_window:
+                    self._recent_shots.pop(0)
 
             # Log full completion to console
             action_str = f"x={action.x:.3f}, y={action.y:.3f}, h={action.horizon}" if action else "INVALID"

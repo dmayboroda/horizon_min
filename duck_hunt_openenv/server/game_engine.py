@@ -41,28 +41,40 @@ class Duck:
     """A duck that flies around and can be shot."""
 
     def __init__(self, round_number: int):
-        # Speed based on round number
-        speed_range = range(SPEED_BASE + round_number, SPEED_BASE + SPEED_VARIANCE + round_number)
-        speed = random.choice(list(speed_range))
+        # Per-duck speed — each duck gets its own random speed
+        # Adds ±20% individual variation on top of the round-based range
+        base_speed = random.randint(SPEED_BASE + round_number, SPEED_BASE + SPEED_VARIANCE + round_number)
+        speed = base_speed * random.uniform(0.8, 1.2)
 
-        # Spawn off-screen from left or right edge, random Y height
-        spawn_left = random.choice([True, False])
-        if spawn_left:
-            self.x = -SPRITE_WIDTH  # just off left edge
+        # Spawn from left, right, or top edge
+        spawn_side = random.choices(
+            ["left", "right", "top"],
+            weights=[0.4, 0.4, 0.2],  # top is less common
+        )[0]
+
+        if spawn_side == "left":
+            self.x = -SPRITE_WIDTH - random.randint(0, 100)
             self.dx = speed
-        else:
-            self.x = SCREEN_WIDTH  # just off right edge
+            y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
+            y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
+            self.y = random.randint(y_min, max(y_min, y_max))
+            self.dy = random.uniform(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
+        elif spawn_side == "right":
+            self.x = SCREEN_WIDTH + random.randint(0, 100)
             self.dx = -speed
+            y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
+            y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
+            self.y = random.randint(y_min, max(y_min, y_max))
+            self.dy = random.uniform(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
+        else:  # top
+            self.x = random.randint(SPRITE_WIDTH, SCREEN_WIDTH - SPRITE_WIDTH)
+            self.y = -SPRITE_HEIGHT - random.randint(0, 50)
+            self.dx = speed * random.choice([-1, 1]) * random.uniform(0.3, 0.7)
+            self.dy = random.uniform(3, 6)  # always moving downward
 
-        # Random Y within playable range
-        y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
-        y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
-        self.y = random.randint(y_min, max(y_min, y_max))
-
-        self.dy = random.randint(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
-        # Ensure dy is not 0
-        if self.dy == 0:
-            self.dy = random.choice([-1, 1])
+        # Ensure dy is not ~0 (minimum vertical movement)
+        if abs(self.dy) < 1.0:
+            self.dy = random.choice([-2.0, 2.0])
 
         self.state = DuckState.FLYING
         self._update_sprite_dir()

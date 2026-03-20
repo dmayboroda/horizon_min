@@ -92,6 +92,15 @@ class DuckHuntEnvWrapper:
 
         obs = self._env.reset()
 
+        # Randomize starting round (1-5) so ducks have varied speeds
+        start_round = random.randint(1, 5)
+        if start_round > 1:
+            self._env.round_number = start_round
+            from game_engine import Round
+            self._env.round = Round(start_round)
+            self._env._update_frame_buffer()
+            obs["frames"] = self._env.frame_buffer.copy()
+
         # Reset episode tracking
         self._total_shots = 0
         self._total_hits = 0

@@ -82,17 +82,26 @@ def compute_reward(
         penalty = 0.0
 
     # ---- proximity bonus (on misses — gives gradient signal) ----
+    # Only measure distance to FLYING ducks — reward aiming at alive targets
     proximity = 0.0
     if not (hit_a or hit_b) and config.proximity_bonus > 0:
         shot_pos = result.get("shot_pos")
         duck_a_pos = result.get("duck_a_pos")
         duck_b_pos = result.get("duck_b_pos")
-        if shot_pos and duck_a_pos and duck_b_pos:
-            dist_a = _distance(shot_pos, duck_a_pos)
-            dist_b = _distance(shot_pos, duck_b_pos)
-            min_dist = min(dist_a, dist_b)
-            proximity = config.proximity_bonus * math.exp(
-                -config.proximity_decay * min_dist
-            )
+        duck_a_state = result.get("duck_a_state", "flying")
+        duck_b_state = result.get("duck_b_state", "flying")
+
+        if shot_pos:
+            distances = []
+            if duck_a_pos and duck_a_state == "flying":
+                distances.append(_distance(shot_pos, duck_a_pos))
+            if duck_b_pos and duck_b_state == "flying":
+                distances.append(_distance(shot_pos, duck_b_pos))
+
+            if distances:
+                min_dist = min(distances)
+                proximity = config.proximity_bonus * math.exp(
+                    -config.proximity_decay * min_dist
+                )
 
     return base - penalty + proximity
