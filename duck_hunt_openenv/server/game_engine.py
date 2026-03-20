@@ -53,14 +53,14 @@ class Duck:
         )[0]
 
         if spawn_side == "left":
-            self.x = -SPRITE_WIDTH - random.randint(0, 100)
+            self.x = -SPRITE_WIDTH - random.randint(0, 20)
             self.dx = speed
             y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
             y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
             self.y = random.randint(y_min, max(y_min, y_max))
             self.dy = random.uniform(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
         elif spawn_side == "right":
-            self.x = SCREEN_WIDTH + random.randint(0, 100)
+            self.x = SCREEN_WIDTH + random.randint(0, 20)
             self.dx = -speed
             y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
             y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
@@ -68,7 +68,7 @@ class Duck:
             self.dy = random.uniform(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
         else:  # top
             self.x = random.randint(SPRITE_WIDTH, SCREEN_WIDTH - SPRITE_WIDTH)
-            self.y = -SPRITE_HEIGHT - random.randint(0, 50)
+            self.y = -SPRITE_HEIGHT - random.randint(0, 10)
             self.dx = speed * random.choice([-1, 1]) * random.uniform(0.3, 0.7)
             self.dy = random.uniform(3, 6)  # always moving downward
 
