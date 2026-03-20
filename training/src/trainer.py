@@ -369,8 +369,8 @@ class DuckHuntGRPOTrainer:
             shot_frame=shot_frame,
         )
 
-        # Advance the real environment
-        self.env.advance_frames(10)
+        # Advance the real environment (larger range for diverse states)
+        self.env.advance_frames(random.randint(15, 60))
 
         return {
             "prompt_ids": inputs["input_ids"][0],  # (T_prompt,)
