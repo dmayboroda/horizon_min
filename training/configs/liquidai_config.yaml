@@ -60,6 +60,9 @@ grpo:
   entropy_coeff: 0.02
   entropy_floor: 0.3                       # lowered — was 1.0, drowning the GRPO signal
   entropy_floor_coeff: 0.1                 # lowered — was 0.5, max penalty now ~0.03 not ~0.35
+  # Curriculum: phase 1 = learn (x,y), phase 2 = learn horizon
+  curriculum_phase2_step: 2000             # unlock horizon at step 2000
+  phase1_max_completion_length: 30         # shorter in phase 1
   use_vllm: false
 
 training:

@@ -32,7 +32,7 @@ from .config import FullConfig
 from .dataset import capture_snapshot, simulate_shot
 from .environment import DuckHuntEnvWrapper
 from .reward import compute_reward
-from .utils import build_prompt, parse_tool_call
+from .utils import Action, build_prompt, parse_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +122,20 @@ class DuckHuntGRPOTrainer:
         # Hotspot detection — track recent shot positions to penalize repetition
         self._recent_shots: list[tuple[float, float]] = []
         self._hotspot_window: int = 50  # track last N shots
-        self._hotspot_penalty: float = 0.5  # reward multiplier when hotspot detected
-        self._hotspot_radius: float = 0.08  # normalized distance threshold
+        self._hotspot_radius: float = 0.10  # normalized distance threshold (wider catch)
 
         # Sample outputs buffer for W&B table logging
         self._sample_outputs: list[dict] = []
+
+        # Curriculum phase tracking
+        self._curriculum_enabled = grpo.curriculum_phase2_step > 0
+        self._phase2_step = grpo.curriculum_phase2_step
+        self._current_phase = 1 if self._curriculum_enabled else 2
+        if self._curriculum_enabled:
+            logger.info(
+                "Curriculum enabled: phase 1 (horizon=0) until step %d, then phase 2",
+                self._phase2_step,
+            )
 
         # wandb
         self._wandb_active = False
@@ -214,6 +223,15 @@ class DuckHuntGRPOTrainer:
         self.env.reset()
 
         for step in range(start_step, total_steps):
+            # Curriculum phase transition
+            if self._curriculum_enabled:
+                if step >= self._phase2_step and self._current_phase == 1:
+                    self._current_phase = 2
+                    logger.info(
+                        "=== CURRICULUM: switching to phase 2 (horizon unlocked) at step %d ===",
+                        step,
+                    )
+
             # 1. Collect a batch from the environment
             batch = self._collect_batch()
 
@@ -321,12 +339,18 @@ class DuckHuntGRPOTrainer:
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         prompt_len = inputs["input_ids"].shape[1]
 
+        # Choose completion length based on curriculum phase
+        if self._current_phase == 1:
+            max_tokens = grpo.phase1_max_completion_length
+        else:
+            max_tokens = grpo.max_completion_length
+
         # Generate G completions
         self.model.eval()
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=grpo.max_completion_length,
+                max_new_tokens=max_tokens,
                 do_sample=True,
                 temperature=grpo.temperature,
                 top_p=grpo.top_p,
@@ -349,6 +373,11 @@ class DuckHuntGRPOTrainer:
             decoded = self.processor.decode(comp_ids, skip_special_tokens=False)
             completions_text.append(decoded)
             action = parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
+
+            # Phase 1: clamp horizon to 0 (model only learns x, y)
+            if action is not None and self._current_phase == 1:
+                action = Action(x=action.x, y=action.y, horizon=0)
+
             parsed_actions.append(action)
 
             if action is not None:
@@ -361,20 +390,25 @@ class DuckHuntGRPOTrainer:
 
             reward = compute_reward(result, action, self.cfg.reward)
 
-            # Hotspot penalty — reduce reward for repetitive coordinates
-            if action is not None and reward > 0:
+            # Hotspot penalty — scaling penalty for repetitive coordinates
+            # At 30% concentration: reward *= 0.0 (hit becomes worthless)
+            # At 50%+: reward becomes negative (actively punished)
+            if action is not None and reward > 0 and len(self._recent_shots) >= 10:
                 shot_pos = (action.x, action.y)
                 nearby = sum(
                     1 for sx, sy in self._recent_shots
                     if abs(sx - shot_pos[0]) < self._hotspot_radius
                     and abs(sy - shot_pos[1]) < self._hotspot_radius
                 )
-                if nearby > len(self._recent_shots) * 0.3:
-                    # More than 30% of recent shots in the same spot
-                    reward *= self._hotspot_penalty
+                concentration = nearby / len(self._recent_shots)
+                if concentration > 0.2:
+                    # Scale: 20%→reward*0.5, 40%→reward*-0.5, 60%+→reward*-1.5
+                    scale = 1.0 - (concentration - 0.2) * 5.0  # linear: 0.2→1.0, 0.4→0.0, 0.6→-1.0
+                    reward = reward * max(scale, -1.5)
                     logger.info(
-                        "  [gen %d] hotspot penalty: %d/%d recent shots near (%.2f, %.2f)",
-                        i, nearby, len(self._recent_shots), shot_pos[0], shot_pos[1],
+                        "  [gen %d] hotspot: %d/%d (%.0f%%) near (%.2f, %.2f), scale=%.2f, reward=%.2f",
+                        i, nearby, len(self._recent_shots), concentration * 100,
+                        shot_pos[0], shot_pos[1], scale, reward,
                     )
 
             rewards.append(reward)
@@ -799,6 +833,7 @@ class DuckHuntGRPOTrainer:
                 "train/mean_entropy": entropy,
                 "train/total_hits": metrics.get("total_hits", 0),
                 "train/step": step + 1,
+                "train/curriculum_phase": self._current_phase,
             }
             wandb.log(log_dict)
 

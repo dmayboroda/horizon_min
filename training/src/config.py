@@ -108,6 +108,12 @@ class GRPOConfig:
     entropy_floor: float = 0.0       # 0 = disabled; if entropy < floor, extra penalty
     entropy_floor_coeff: float = 0.5  # strength of the floor penalty
 
+    # Curriculum: two-phase training
+    # Phase 1: horizon fixed to 0, shorter completions (learn x,y aiming)
+    # Phase 2: horizon unlocked (learn horizon optimization)
+    curriculum_phase2_step: int = 0   # 0 = disabled (no curriculum); >0 = step to unlock horizon
+    phase1_max_completion_length: int = 30  # shorter completions in phase 1
+
     # vLLM (disabled by default for small-scale)
     use_vllm: bool = False
 
