@@ -66,7 +66,7 @@ grpo:
   use_vllm: false
 
 training:
-  output_dir: "./outputs/lfm25_duckhunt_grpo_v2"
+  output_dir: "./outputs/lfm25_duckhunt_grpo_v4"
   num_train_epochs: 3
   max_steps: -1
   per_device_train_batch_size: 2
@@ -106,7 +106,7 @@ reward:
 
 logging:
   wandb_project: "duckhunt-grpo"
-  wandb_run_name: "lfm25-vl-1.6b-grpo-v3"
+  wandb_run_name: "lfm25-vl-1.6b-grpo-v4"
   report_to: "wandb"
   log_completions: true
   num_completions_to_print: 5
