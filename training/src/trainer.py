@@ -284,17 +284,24 @@ class DuckHuntGRPOTrainer:
         grpo = self.cfg.grpo
         G = grpo.num_generations
 
-        # Find a state with flying ducks (retry up to 20 times)
-        for _attempt in range(20):
+        # Find a state with flying ducks (prefer 2, accept 1 after retries)
+        for _attempt in range(30):
             if self.env.is_done():
                 self.env.reset()
+            # Advance a few frames so ducks enter the screen from off-screen spawn
+            if _attempt < 5:
+                self.env.advance_frames(random.randint(5, 15))
             frames = self.env.get_frames()
             state = self.env.get_state()
-            if state.get("ducks_flying", 0) > 0 and len(frames) > 0:
+            flying = state.get("ducks_flying", 0)
+            if flying >= 2 and len(frames) > 0:
                 break
-            self.env.advance_frames(random.randint(10, 30))
+            if flying >= 1 and _attempt >= 15 and len(frames) > 0:
+                # Accept 1 duck after enough retries
+                break
+            self.env.advance_frames(random.randint(5, 20))
         else:
-            logger.warning("Could not find flying ducks after 20 attempts, using current state")
+            logger.warning("Could not find 2 flying ducks after 30 attempts, using current state")
 
         # Build prompt
         messages, tools = build_prompt(frames, state)
