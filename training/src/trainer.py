@@ -137,6 +137,27 @@ class DuckHuntGRPOTrainer:
                 self._phase2_step,
             )
 
+        # Early training stabilization
+        self._stabilization_steps = grpo.stabilization_steps
+        self._stabilization_grad_accum = grpo.stabilization_grad_accum
+        self._normal_grad_accum = train.gradient_accumulation_steps
+        self._lora_freeze_steps = grpo.lora_freeze_steps
+        self._lora_frozen = False
+
+        if self._lora_freeze_steps > 0:
+            self._freeze_lora()
+            logger.info(
+                "LoRA frozen for first %d steps (experience collection only)",
+                self._lora_freeze_steps,
+            )
+        if self._stabilization_steps > 0:
+            logger.info(
+                "Stabilization: grad_accum=%d for first %d steps (then %d)",
+                self._stabilization_grad_accum,
+                self._stabilization_steps,
+                self._normal_grad_accum,
+            )
+
         # wandb
         self._wandb_active = False
         if _WANDB and config.logging.report_to == "wandb":
@@ -204,6 +225,29 @@ class DuckHuntGRPOTrainer:
         }
 
     # ------------------------------------------------------------------
+    #  LoRA freeze / unfreeze
+    # ------------------------------------------------------------------
+    def _freeze_lora(self) -> None:
+        """Freeze all LoRA parameters (base model already frozen by PEFT)."""
+        for name, param in self.model.named_parameters():
+            if "lora" in name.lower():
+                param.requires_grad_(False)
+        self._lora_frozen = True
+
+    def _unfreeze_lora(self) -> None:
+        """Unfreeze LoRA parameters."""
+        for name, param in self.model.named_parameters():
+            if "lora" in name.lower():
+                param.requires_grad_(True)
+        self._lora_frozen = False
+
+    def _get_grad_accum(self, step: int) -> int:
+        """Return gradient accumulation steps for the current step."""
+        if self._stabilization_steps > 0 and step < self._stabilization_steps:
+            return self._stabilization_grad_accum
+        return self._normal_grad_accum
+
+    # ------------------------------------------------------------------
     #  Main training loop
     # ------------------------------------------------------------------
     def train(self, resume_from: str | None = None) -> None:
@@ -223,6 +267,23 @@ class DuckHuntGRPOTrainer:
         self.env.reset()
 
         for step in range(start_step, total_steps):
+            # LoRA unfreeze transition
+            if self._lora_frozen and step >= self._lora_freeze_steps:
+                self._unfreeze_lora()
+                logger.info(
+                    "=== LoRA unfrozen at step %d (training begins) ===", step,
+                )
+
+            # Stabilization → normal grad accum transition
+            if (
+                self._stabilization_steps > 0
+                and step == self._stabilization_steps
+            ):
+                logger.info(
+                    "=== Stabilization complete at step %d: grad_accum %d → %d ===",
+                    step, self._stabilization_grad_accum, self._normal_grad_accum,
+                )
+
             # Curriculum phase transition
             if self._curriculum_enabled:
                 if step >= self._phase2_step and self._current_phase == 1:
@@ -239,20 +300,25 @@ class DuckHuntGRPOTrainer:
             loss, metrics = self._compute_grpo_loss(batch)
 
             # 3. Backprop (with grad accumulation)
-            scaled_loss = loss / train.gradient_accumulation_steps
+            grad_accum = self._get_grad_accum(step)
+            scaled_loss = loss / grad_accum
             scaled_loss.backward()
 
-            if (step + 1) % train.gradient_accumulation_steps == 0:
-                # Compute gradient norm before clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), train.max_grad_norm
-                )
-                self._last_grad_norm = grad_norm.item()
+            if (step + 1) % grad_accum == 0:
+                if self._lora_frozen:
+                    # LoRA frozen — discard gradients, no weight update
+                    self.optimizer.zero_grad()
+                else:
+                    # Compute gradient norm before clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), train.max_grad_norm
+                    )
+                    self._last_grad_norm = grad_norm.item()
 
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-                self.global_step += 1
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+                    self.global_step += 1
 
             # Track hit rate
             rewards = batch["rewards"]
@@ -880,6 +946,8 @@ class DuckHuntGRPOTrainer:
                 "train/total_hits": metrics.get("total_hits", 0),
                 "train/step": step + 1,
                 "train/curriculum_phase": self._current_phase,
+                "train/lora_frozen": int(self._lora_frozen),
+                "train/grad_accum": self._get_grad_accum(step),
             }
             wandb.log(log_dict)
 

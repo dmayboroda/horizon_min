@@ -114,6 +114,13 @@ class GRPOConfig:
     curriculum_phase2_step: int = 0   # 0 = disabled (no curriculum); >0 = step to unlock horizon
     phase1_max_completion_length: int = 30  # shorter completions in phase 1
 
+    # Early training stabilization
+    # Higher grad accumulation in early steps averages over more duck positions,
+    # reducing seed sensitivity. Reverts to normal after stabilization_steps.
+    stabilization_steps: int = 0          # 0 = disabled; number of steps with boosted accumulation
+    stabilization_grad_accum: int = 8     # gradient_accumulation_steps during stabilization
+    lora_freeze_steps: int = 0            # 0 = disabled; freeze LoRA for first N steps (collect experience only)
+
     # vLLM (disabled by default for small-scale)
     use_vllm: bool = False
 

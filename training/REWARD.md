@@ -374,7 +374,54 @@ grpo:
 
 W&B logs `train/curriculum_phase` (1 or 2) so you can see the transition.
 
-## 9. Config Reference
+## 9. Early Training Stabilization
+
+LoRA weights start at zero — the first gradient updates have outsized influence on the training direction. If the first few steps happen to have ducks clustered in one area, the model develops a bias that takes hundreds of steps to unlearn. This causes different hit rate trajectories across runs with different seeds.
+
+Three mechanisms reduce this seed sensitivity:
+
+### 9.1 LoRA freeze
+
+LoRA parameters are frozen for the first `lora_freeze_steps` (default 50). The model runs forward passes and collects batches but no weight updates occur. This lets the optimizer/scheduler warm up and populates the hotspot tracker before any learning signal reaches the weights.
+
+### 9.2 Stabilization (boosted gradient accumulation)
+
+For the first `stabilization_steps` (default 500), `gradient_accumulation_steps` is temporarily increased to `stabilization_grad_accum` (default 8, effective batch = 16). Each weight update averages over more duck positions, reducing the influence of any single state.
+
+After `stabilization_steps`, accumulation reverts to the normal value (default 4, effective batch = 8).
+
+### 9.3 Warmup
+
+`warmup_ratio: 0.10` gradually ramps the learning rate from ~0 to the target over 10% of total steps. Early gradients (which are high-variance due to random game states) produce smaller weight updates.
+
+### Timeline
+
+```
+Step 0                50              500              2000          end
+  |--- LoRA frozen ---|--- stabilization (grad_accum=8) ---|
+  |---------------- warmup (LR ramp) ---------|
+  |----------------------- Phase 1 (horizon=0) -----------|-- Phase 2 --|
+```
+
+### W&B tracking
+
+| Metric | Values | Description |
+|--------|--------|-------------|
+| `train/lora_frozen` | 0 or 1 | Whether LoRA is currently frozen |
+| `train/grad_accum` | 4 or 8 | Current gradient accumulation steps |
+| `train/curriculum_phase` | 1 or 2 | Curriculum phase |
+
+```yaml
+grpo:
+  lora_freeze_steps: 50          # 0 = disabled
+  stabilization_steps: 500       # 0 = disabled
+  stabilization_grad_accum: 8    # grad_accum during stabilization
+
+training:
+  warmup_ratio: 0.10
+```
+
+## 11. Config Reference
 
 ```yaml
 reward:
@@ -393,7 +440,7 @@ reward:
   max_horizon: 30            # max horizon for penalty normalization
 ```
 
-## 10. Tuning Guide
+## 12. Tuning Guide
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
@@ -410,3 +457,5 @@ reward:
 | Same duck positions every step | Environment not advancing to new match | Verify `auto_advance_to_next_match()` is called each step |
 | Hit rate stalls in phase 1 | Model learned aiming but needs horizon | Transition to phase 2 earlier (lower `curriculum_phase2_step`) |
 | Hit rate drops at phase 2 start | Normal — model adjusting to harder task | Let it run 500+ steps, should recover |
+| Different hit rates across runs (<1k steps) | Seed sensitivity — early duck positions bias LoRA direction | Increase `stabilization_steps` and `stabilization_grad_accum`, or increase `lora_freeze_steps` |
+| Early training unstable / spiky loss | Gradients too noisy from random game states | Increase `warmup_ratio` to 0.15, increase `stabilization_grad_accum` to 16 |

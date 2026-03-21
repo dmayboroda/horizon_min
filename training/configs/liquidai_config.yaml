@@ -63,6 +63,10 @@ grpo:
   # Curriculum: phase 1 = learn (x,y), phase 2 = learn horizon
   curriculum_phase2_step: 2000             # unlock horizon at step 2000
   phase1_max_completion_length: 30         # shorter in phase 1
+  # Early training stabilization (reduce seed sensitivity)
+  stabilization_steps: 500                 # boosted grad_accum for first 500 steps
+  stabilization_grad_accum: 8             # effective batch = 16 during stabilization
+  lora_freeze_steps: 50                    # collect experience for 50 steps before training LoRA
   use_vllm: false
 
 training:
@@ -72,7 +76,7 @@ training:
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 4
   learning_rate: 1.0e-5                    # conservative LR for stable GRPO
-  warmup_ratio: 0.05                       # longer warmup
+  warmup_ratio: 0.10                       # longer warmup — reduces seed sensitivity
   weight_decay: 0.01
   lr_scheduler_type: "cosine"
   max_grad_norm: 1.0
