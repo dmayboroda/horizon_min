@@ -329,21 +329,16 @@ class LiquidAIFormat(ModelFormat):
         if liq_match:
             return self._parse_kwargs(liq_match.group(1), max_horizon)
 
-        # --- Plain pythonic shoot(...) ---
+        # --- Plain pythonic shoot(...) without special tokens ---
         py_match = re.search(
             r"shoot\s*\((.*?)\)", output_text, re.DOTALL | re.IGNORECASE,
         )
         if py_match:
             return self._parse_kwargs(py_match.group(1), max_horizon)
 
-        # --- shared fallbacks ---
-        action = self._try_json_fallback(output_text, max_horizon)
-        if action:
-            return action
-        action = self._try_kv_fallback(output_text, max_horizon)
-        if action:
-            return action
-
+        # No JSON or KV fallbacks — LiquidAI must use pythonic format.
+        # Mistral-style JSON (e.g. [{"name":"shoot","arguments":{...}}])
+        # is intentionally rejected as invalid to force correct format learning.
         logger.warning("Failed to parse LiquidAI tool call from: %s", output_text[:200])
         return None
 

@@ -151,7 +151,19 @@ proximity = proximity_bonus * exp(-proximity_decay * min_distance_to_flying_duck
 - Beyond ~200px: negligible bonus (<0.1)
 - At max distance (diagonal): effectively zero
 
-## 2. Format Reward
+## 2. Format Strictness (per model family)
+
+Each model family has a strict parser in `src/formats.py`. Outputs that don't match the model's native format are rejected as **invalid** (accuracy = -1.0, format = 0.0).
+
+**LiquidAI** accepts only pythonic format:
+- `<|tool_call_start|>[shoot(x=0.5, y=0.3, horizon=8)]<|tool_call_end|>` — primary
+- `shoot(x=0.5, y=0.3, horizon=8)` — plain pythonic (no special tokens)
+
+Mistral-style JSON (`[{"name": "shoot", "arguments": {...}}]`) is **intentionally rejected** even though it contains valid coordinates. Without this, the model gets rewarded for using the wrong format, removing the learning signal to produce its native tool call syntax.
+
+**Mistral** accepts its native format plus JSON/KV fallbacks (Mistral models occasionally vary their JSON structure).
+
+## 3. Format Reward
 
 Computed in `src/dataset.py → make_format_reward_function()`. Scores the structural quality of the output.
 
@@ -167,11 +179,11 @@ Model output
     └─ Valid call + extra text?        → max(0.3, 1.0 - extra_chars * 0.01)
 ```
 
-### 2.1 No tool call: `0.0`
+### 3.1 No tool call: `0.0`
 
 The model didn't produce any parseable function call. Different from accuracy's -1.0 because format reward is scaled by `format_weight = 0.3`, so the total contribution is `0.3 * 0.0 = 0.0`.
 
-### 2.2 Clean tool call: `1.0`
+### 3.2 Clean tool call: `1.0`
 
 The model produced a valid tool call with no extra text:
 ```
@@ -180,7 +192,7 @@ The model produced a valid tool call with no extra text:
 
 This is the maximum format reward. Special tokens (`<|pad|>`, `<|im_end|>`) don't count as extra text.
 
-### 2.3 Verbose tool call: `0.3–0.9`
+### 3.3 Verbose tool call: `0.3–0.9`
 
 The model produced a valid tool call but also generated explanatory text:
 ```
@@ -198,7 +210,7 @@ Penalty scales linearly with extra character count:
 
 **Why penalize verbosity**: extra tokens waste compute and slow inference. The model should learn to respond with just the tool call. The floor at 0.3 ensures that a verbose-but-valid response is still better than no tool call (0.0).
 
-## 3. Hotspot Penalty (anti-exploit)
+## 4. Hotspot Penalty (anti-exploit)
 
 Implemented in `src/trainer.py`. Prevents the model from exploiting a fixed position (e.g. always shooting screen center).
 
@@ -231,7 +243,7 @@ if concentration > 0.2:
 - `hotspot_radius`: 0.10 (~80px zone)
 - Scale: linear from 1.0 at 20% to -1.5 floor at 50%+
 
-## 4. Combined Reward
+## 5. Combined Reward
 
 The total reward per generation is:
 
@@ -282,7 +294,7 @@ invalid < miss                     →  always better to produce a parseable too
 miss_near_flying > miss_near_dead  →  proximity only to alive ducks
 ```
 
-## 5. How Rewards Drive GRPO Learning
+## 6. How Rewards Drive GRPO Learning
 
 GRPO samples G generations (default 6) for each game state and computes group-normalized advantages:
 
@@ -312,9 +324,9 @@ If all 6 generations get the same reward (e.g. all miss by the same distance), `
 If the model collapses to one output (e.g. always `shoot(x=0.5, y=0.5, horizon=8)`), all 6 generations get identical rewards. `std = 0`, advantages = 0, no gradient. Multiple mechanisms prevent this:
 - Entropy bonus/floor keeps the policy stochastic
 - Hotspot penalty makes repeated-position hits negative at >40% concentration
-- New match every step ensures diverse duck positions (see section 6)
+- New match every step ensures diverse duck positions (see section 7)
 
-## 6. Environment Diversity
+## 7. Environment Diversity
 
 The trainer forces **a new match every training step**. This means every step has fresh ducks with new random spawn positions, speeds, and directions. Without this, the same two ducks would persist for 15-60 steps while bouncing around, causing the model to see similar frames repeatedly.
 
@@ -331,7 +343,7 @@ Additional diversity mechanisms:
 - Mid-flight jitter: 3% chance per frame of direction nudge
 - Bounce speed jitter: +/-15% on wall bounce
 
-## 7. Curriculum Training
+## 8. Curriculum Training
 
 Training is split into two phases to help the model learn incrementally:
 
@@ -362,7 +374,7 @@ grpo:
 
 W&B logs `train/curriculum_phase` (1 or 2) so you can see the transition.
 
-## 8. Config Reference
+## 9. Config Reference
 
 ```yaml
 reward:
@@ -381,7 +393,7 @@ reward:
   max_horizon: 30            # max horizon for penalty normalization
 ```
 
-## 9. Tuning Guide
+## 10. Tuning Guide
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
