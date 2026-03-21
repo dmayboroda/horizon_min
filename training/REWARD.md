@@ -28,7 +28,7 @@ Model output
     │
     ├─ Hit one duck?                   → +1.0 - horizon_penalty  (hit)
     │
-    └─ Missed?                         → -0.3 + proximity_bonus  (miss)
+    └─ Missed?                         → -0.3 - horizon_penalty_miss + proximity_bonus  (miss)
 ```
 
 ### 1.1 Invalid action: `-1.0`
@@ -66,31 +66,53 @@ Base reward for hitting one duck (+1.0) or both ducks simultaneously (+2.5). The
 
 ### 1.5 Horizon penalty
 
-**Only applied on hits.** Penalizes large horizons to encourage the model to shoot sooner:
+**Applied on both hits and misses** with different strengths. Penalizes large horizons to encourage the model to shoot sooner rather than using high horizon as a lottery ticket.
+
+#### On hits:
 
 ```
 penalty = lambda_horizon * (horizon / max_horizon)
-       = 0.1 * (horizon / 30)
+       = 0.4 * (horizon / 30)
 ```
 
 | Horizon | Penalty | Net single hit | Net double kill |
 |---------|---------|---------------|-----------------|
 | 0 | 0.000 | +1.000 | +2.500 |
-| 5 | 0.017 | +0.983 | +2.483 |
-| 10 | 0.033 | +0.967 | +2.467 |
-| 15 | 0.050 | +0.950 | +2.450 |
-| 20 | 0.067 | +0.933 | +2.433 |
-| 30 | 0.100 | +0.900 | +2.400 |
+| 5 | 0.067 | +0.933 | +2.433 |
+| 10 | 0.133 | +0.867 | +2.367 |
+| 15 | 0.200 | +0.800 | +2.300 |
+| 20 | 0.267 | +0.733 | +2.233 |
+| 30 | 0.400 | +0.600 | +2.100 |
 
-**Why only on hits**: on misses, the model needs to explore different horizons to find one that works. Penalizing horizon on misses would discourage this exploration. On hits, we want the model to discover that shorter horizons give higher rewards.
+**Why 0.4**: the old value (0.1) was too weak — a hit with h=30 scored +0.9, giving almost no incentive to reduce horizon. At 0.4, a hit with h=30 scores +0.6, creating real pressure to aim with shorter horizons while still keeping any hit better than a miss.
 
-**Why it's small (0.1 max)**: the penalty must never make a hit worse than a miss. A hit with horizon=30 gives `1.0 - 0.1 = 0.9`, still much better than a miss at `-0.3`.
+#### On misses:
 
-### 1.6 Miss: `-0.3`
+```
+penalty = lambda_horizon_miss * (horizon / max_horizon)
+       = 0.2 * (horizon / 30)
+```
 
-The shot was valid, ducks were flying, but the shot didn't hit any duck's hitbox.
+| Horizon | Penalty | Net miss (before proximity) |
+|---------|---------|---------------------------|
+| 0 | 0.000 | -0.300 |
+| 5 | 0.033 | -0.333 |
+| 10 | 0.067 | -0.367 |
+| 15 | 0.100 | -0.400 |
+| 20 | 0.133 | -0.433 |
+| 30 | 0.200 | -0.500 |
 
-**Why -0.3 (not -1.0)**: a miss with a valid tool call is much better than invalid output. The model at least produced the right format and attempted to aim. The proximity bonus (below) provides gradient signal to improve aim.
+**Why penalize horizon on misses**: without this, all misses with the same proximity get identical rewards regardless of horizon. A miss with h=24 is objectively worse than h=2 — the model waited longer and still missed, making the prediction harder. This creates gradient signal to reduce horizon even when the model is mostly missing (e.g. 15% hit rate), which is when horizon optimization matters most.
+
+**Why 0.2 (lower than hits)**: misses are already negative, so we don't need as strong a penalty. The miss with h=30 goes from -0.3 to -0.5, which is meaningful but doesn't approach `shoot_dead_duck` (-0.7) territory.
+
+### 1.6 Miss: `-0.3 - horizon_penalty_miss`
+
+The shot was valid, ducks were flying, but the shot didn't hit any duck's hitbox. The base miss reward is -0.3, further penalized by horizon (see section 1.5).
+
+**Why -0.3 base (not -1.0)**: a miss with a valid tool call is much better than invalid output. The model at least produced the right format and attempted to aim. The proximity bonus (below) provides gradient signal to improve aim.
+
+**Effective miss range**: from -0.3 (h=0) to -0.5 (h=30), before proximity bonus.
 
 ### 1.7 Proximity bonus (target-aware)
 
@@ -229,15 +251,17 @@ if concentration > 0.2 AND total > 0:
 
 | Scenario | Accuracy | Format | Hotspot | Total |
 |----------|---------|--------|---------|-------|
-| Hit duck, clean output, h=5 | +0.983 | 1.0 | none | +1.283 |
-| Hit duck, clean, h=5, **30% conc.** | +0.983 | 1.0 | scale=0.5 | **+0.642** |
-| Hit duck, clean, h=5, **50% conc.** | +0.983 | 1.0 | scale=-0.5 | **-0.642** |
-| Hit duck, verbose output, h=5 | +0.983 | 0.5 | none | +1.133 |
-| Close miss to flying duck (d=0.05), clean | -0.066 | 1.0 | — | +0.234 |
-| Close miss to dead duck (d=0.05), clean | -0.300 | 1.0 | — | +0.000 |
-| Far miss (d=0.5), clean | -0.275 | 1.0 | — | +0.025 |
+| Hit duck, clean output, h=5 | +0.933 | 1.0 | none | +1.233 |
+| Hit duck, clean, h=5, **30% conc.** | +0.933 | 1.0 | scale=0.5 | **+0.617** |
+| Hit duck, clean, h=5, **50% conc.** | +0.933 | 1.0 | scale=-0.5 | **-0.617** |
+| Hit duck, verbose output, h=5 | +0.933 | 0.5 | none | +1.083 |
+| Close miss to flying duck (d=0.05), h=5, clean | -0.099 | 1.0 | — | +0.201 |
+| Close miss to flying duck (d=0.05), h=20, clean | -0.199 | 1.0 | — | +0.101 |
+| Close miss to dead duck (d=0.05), h=5, clean | -0.333 | 1.0 | — | -0.033 |
+| Far miss (d=0.5), h=0, clean | -0.275 | 1.0 | — | +0.025 |
+| Far miss (d=0.5), h=20, clean | -0.408 | 1.0 | — | -0.108 |
 | Miss, no tool call | -1.0 | 0.0 | — | -1.000 |
-| Miss, verbose but parseable | -0.300 | 0.5 | — | -0.150 |
+| Miss, verbose but parseable, h=15 | -0.400 | 0.5 | — | -0.250 |
 | Duck escaped during horizon | -0.700 | 1.0 | — | -0.400 |
 | Double kill, h=0 | +2.500 | 1.0 | none | +2.800 |
 | Double kill, h=0, **40% conc.** | +2.500 | 1.0 | scale=0.0 | **0.000** |
@@ -248,9 +272,9 @@ These must always hold for the reward system to provide correct learning signal:
 
 ```
 double_kill > hit > close_miss > far_miss > shoot_nothing > shoot_dead > invalid
-  +2.5      +1.0    ~-0.1       ~-0.3       -0.5           -0.7        -1.0
+  +2.5      +1.0    ~-0.1       ~-0.3...-0.5  -0.5           -0.7        -1.0
 
-hit(h=30) > miss                   →  lowest hit (0.9) still better than best miss (0.0)
+hit(h=30) > miss                   →  lowest hit (0.6) still better than best miss (0.0)
 novel_hit > hotspot_hit(30%)       →  diverse aiming rewarded over position spam
 hotspot_hit(50%) < miss            →  severe spam is worse than missing
 clean > verbose                    →  format reward always higher for concise output
@@ -275,7 +299,8 @@ If all 6 generations get the same reward (e.g. all miss by the same distance), `
 | Source | How it creates variance |
 |--------|----------------------|
 | Hit vs miss | +1.0 vs -0.3 = huge signal |
-| Different horizons on hits | h=3 (+0.99) vs h=20 (+0.93) = small but useful |
+| Different horizons on hits | h=3 (+0.96) vs h=20 (+0.73) = strong signal |
+| Different horizons on misses | h=3 (-0.32) vs h=20 (-0.43) = useful variance |
 | Proximity bonus on misses (flying only) | close miss (-0.1) vs far miss (-0.28) = moderate signal |
 | Aiming at flying vs dead duck | proximity bonus (-0.1) vs no bonus (-0.3) = teaches target selection |
 | Format quality | clean (1.0) vs verbose (0.5) = moderate signal |
@@ -347,7 +372,8 @@ reward:
   shoot_nothing: -0.5        # shooting when no ducks flying
   shoot_dead_duck: -0.7      # ducks escaped during latency+horizon wait
   invalid_action: -1.0       # unparseable model output
-  lambda_horizon: 0.1        # horizon penalty coefficient (on hits only)
+  lambda_horizon: 0.4        # horizon penalty coefficient (on hits)
+  lambda_horizon_miss: 0.2   # horizon penalty coefficient (on misses)
   proximity_bonus: 0.3       # max proximity bonus (on misses only)
   proximity_decay: 5.0       # how fast proximity bonus decays with distance
   format_weight: 0.3         # weight for format reward in total
@@ -362,7 +388,7 @@ reward:
 | Model never produces tool calls | `invalid_action` not negative enough, or format reward weight too low | Increase `format_weight` to 0.5 |
 | Model always shoots center | Hitbox too large, or not enough game state diversity | Reduce hitbox, advance more frames between steps |
 | Model uses horizon=0 always | `lambda_horizon` too high | Reduce to 0.05 |
-| Model uses horizon=30 always | No penalty for dead ducks, or `lambda_horizon` too low | Check `shoot_dead_duck`, increase `lambda_horizon` to 0.15 |
+| Model uses horizon=30 always | No penalty for dead ducks, or `lambda_horizon` too low | Check `shoot_dead_duck`, increase `lambda_horizon` and `lambda_horizon_miss` |
 | All generations get same reward | Model collapsed, or proximity bonus too small | Increase `proximity_bonus`, check entropy config |
 | Hit rate plateau | Proximity decay too slow (bonus too easy) | Increase `proximity_decay` to 8.0 |
 | Model writes explanations | Format verbosity penalty too weak | Reduce format floor from 0.3 to 0.1 |

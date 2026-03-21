@@ -45,6 +45,8 @@ class Duck:
         # Adds ±20% individual variation on top of the round-based range
         base_speed = random.randint(SPEED_BASE + round_number, SPEED_BASE + SPEED_VARIANCE + round_number)
         speed = base_speed * random.uniform(0.8, 1.2)
+        # Per-duck horizontal speed variation — ducks don't all fly at the same angle
+        dx_scale = random.uniform(0.7, 1.0)
 
         # Spawn from left, right, or top edge
         spawn_side = random.choices(
@@ -53,22 +55,22 @@ class Duck:
         )[0]
 
         if spawn_side == "left":
-            self.x = -SPRITE_WIDTH - random.randint(0, 20)
-            self.dx = speed
+            self.x = -SPRITE_WIDTH - random.randint(0, 60)
+            self.dx = speed * dx_scale
             y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
             y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
             self.y = random.randint(y_min, max(y_min, y_max))
             self.dy = random.uniform(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
         elif spawn_side == "right":
-            self.x = SCREEN_WIDTH + random.randint(0, 20)
-            self.dx = -speed
+            self.x = SCREEN_WIDTH + random.randint(0, 60)
+            self.dx = -speed * dx_scale
             y_min = int(SPAWN_Y_MIN_FRAC * SCREEN_HEIGHT)
             y_max = int(SPAWN_Y_MAX_FRAC * SCREEN_HEIGHT) - SPRITE_HEIGHT
             self.y = random.randint(y_min, max(y_min, y_max))
             self.dy = random.uniform(BOUNCE_DY_MIN, BOUNCE_DY_MAX)
         else:  # top
             self.x = random.randint(SPRITE_WIDTH, SCREEN_WIDTH - SPRITE_WIDTH)
-            self.y = -SPRITE_HEIGHT - random.randint(0, 10)
+            self.y = -SPRITE_HEIGHT - random.randint(0, 30)
             self.dx = speed * random.choice([-1, 1]) * random.uniform(0.3, 0.7)
             self.dy = random.uniform(3, 6)  # always moving downward
 

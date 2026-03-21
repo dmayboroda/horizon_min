@@ -23,15 +23,15 @@ SPRITE_WIDTH = 81
 SPRITE_HEIGHT = 75
 
 # Hit detection box (centered on sprite)
-HITBOX_WIDTH = 60   # ~7.5% of screen width
-HITBOX_HEIGHT = 55  # ~11% of screen height
+HITBOX_WIDTH = 40   # ~5% of screen width
+HITBOX_HEIGHT = 36  # ~7.2% of screen height
 SPEED_BASE = 6  # Minimum speed component (was 4 — faster ducks)
 SPEED_VARIANCE = 4  # Added to base (was 2 — wider speed range)
 # Speed = BASE+round to BASE+VARIANCE+round
 # Round 1: 7–11 px/frame (was 5–7)
 
 # SPAWN (ducks always enter from off-screen edges)
-SPAWN_Y_MIN_FRAC = 0.3   # normalised min Y for spawn height
+SPAWN_Y_MIN_FRAC = 0.15  # normalised min Y for spawn height (higher spawn possible)
 SPAWN_Y_MAX_FRAC = 0.85  # normalised max Y for spawn height (avoid dog area)
 
 # MID-FLIGHT JITTER (makes trajectories less predictable)

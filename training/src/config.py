@@ -169,7 +169,8 @@ class RewardConfig:
     double_kill: float = 2.5
     miss: float = -0.3
     shoot_nothing: float = -0.5
-    lambda_horizon: float = 0.1
+    lambda_horizon: float = 0.4
+    lambda_horizon_miss: float = 0.2
     bonus_perfect_match: float = 0.5
     bonus_perfect_round: float = 2.0
 

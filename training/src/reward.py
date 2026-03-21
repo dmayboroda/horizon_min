@@ -86,11 +86,12 @@ def compute_reward_detailed(
         bd.base = config.miss
         bd.outcome = "miss"
 
-    # ---- horizon penalty (only on hits) ----
+    # ---- horizon penalty ----
+    horizon_ratio = action.horizon / max(config.max_horizon, 1)
     if hit_a or hit_b:
-        bd.horizon_penalty = config.lambda_horizon * (
-            action.horizon / max(config.max_horizon, 1)
-        )
+        bd.horizon_penalty = config.lambda_horizon * horizon_ratio
+    else:
+        bd.horizon_penalty = config.lambda_horizon_miss * horizon_ratio
 
     # ---- proximity bonus (on misses, flying ducks only) ----
     if not (hit_a or hit_b) and config.proximity_bonus > 0:
