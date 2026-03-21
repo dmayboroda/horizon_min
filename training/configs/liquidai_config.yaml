@@ -99,14 +99,14 @@ reward:
   miss: -0.3
   shoot_nothing: -0.5
   lambda_horizon: 0.1
-  proximity_bonus: 0.3                     # less reward for near-miss
-  proximity_decay: 5.0
+  proximity_bonus: 0.5                     # stronger signal for close shots
+  proximity_decay: 3.0                     # slower decay — wider gradient catchment
   format_weight: 0.3
   accuracy_weight: 1.0
 
 logging:
   wandb_project: "duckhunt-grpo"
-  wandb_run_name: "lfm25-vl-1.6b-grpo-v4"
+  wandb_run_name: "lfm25-vl-1.6b-grpo-v5"
   report_to: "wandb"
   log_completions: true
   num_completions_to_print: 5
