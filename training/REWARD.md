@@ -180,28 +180,34 @@ Penalty scales linearly with extra character count:
 
 Implemented in `src/trainer.py`. Prevents the model from exploiting a fixed position (e.g. always shooting screen center).
 
-The trainer tracks the last 50 shot positions. If more than 30% of them are within 0.08 normalized distance (~64px) of the current shot, and the current shot is a **hit** (reward > 0), the reward is multiplied by 0.5.
+The trainer tracks the last 50 shot positions. For each hit (reward > 0), it calculates the **concentration** — what fraction of recent shots are within 0.10 normalized distance (~80px) of the current shot. If concentration exceeds 20%, the reward is scaled down linearly, eventually going **negative** at high concentration.
 
 ```
-if hit AND >30% of last 50 shots within 0.08 of (x, y):
-    reward *= 0.5
+concentration = nearby_shots / total_tracked_shots
+
+if concentration > 0.2:
+    scale = 1.0 - (concentration - 0.2) * 5.0
+    reward = reward * max(scale, -1.5)
 ```
 
-| Scenario | Raw reward | After hotspot | Why |
-|----------|-----------|--------------|-----|
-| Hit at (0.5, 0.5), first time | +1.0 | +1.0 | No history of this position |
-| Hit at (0.5, 0.5), 20th time in a row | +1.0 | **+0.5** | >30% of recent shots at center |
-| Hit at (0.35, 0.6), diverse history | +1.0 | +1.0 | Not a hotspot |
-| Miss at (0.5, 0.5), repeated | -0.2 | -0.2 | Only applies to positive rewards |
+| Concentration | Scale | Hit (+1.0) becomes | Effect |
+|---|---|---|---|
+| <20% | 1.0 | +1.0 | No penalty |
+| 20% | 1.0 | +1.0 | Threshold |
+| 30% | 0.5 | +0.5 | Reduced |
+| 40% | 0.0 | **0.0** | Hit is worthless |
+| 50% | -0.5 | **-0.5** | Hit is punished |
+| 60% | -1.0 | **-1.0** | Same as invalid output |
+| 80%+ | -1.5 (floor) | **-1.5** | Worse than anything |
 
-**Why only on hits**: misses are already negative. Reducing them further would just make the model avoid shooting entirely. The hotspot penalty specifically makes a repeated-position hit less rewarding than a novel-position hit.
+**Why scaling goes negative**: a flat 0.5x penalty (the old approach) left hotspot hits at +0.5, still much better than any miss. The model rationally preferred spamming the hotspot. With scaling, at 40%+ concentration a hotspot hit is worth 0.0 or less — the only way to get positive reward is to aim somewhere new.
 
-**Why 30% threshold**: the model generates 6 shots per step, each tracked independently. If 3 out of 6 generations target the same spot step after step, that position accumulates quickly in the 50-shot window. The 30% threshold triggers after roughly 5 consecutive steps of spamming the same position.
+**Why only on hits**: misses are already negative. The penalty specifically makes repeated-position hits unrewarding.
 
 **Parameters** (hardcoded in trainer):
 - `hotspot_window`: 50 (track last N shots)
-- `hotspot_penalty`: 0.5 (reward multiplier when triggered)
-- `hotspot_radius`: 0.08 (~64px zone)
+- `hotspot_radius`: 0.10 (~80px zone)
+- Scale: linear from 1.0 at 20% to -1.5 floor at 50%+
 
 ## 4. Combined Reward
 
@@ -211,28 +217,30 @@ The total reward per generation is:
 total = 1.0 * accuracy_reward + 0.3 * format_reward
 ```
 
-Then the hotspot penalty may reduce it:
+Then the hotspot penalty may scale it (only on positive rewards):
 
 ```
-if hotspot_detected AND total > 0:
-    total *= 0.5
+if concentration > 0.2 AND total > 0:
+    scale = 1.0 - (concentration - 0.2) * 5.0
+    total = total * max(scale, -1.5)
 ```
 
 ### Example scenarios
 
 | Scenario | Accuracy | Format | Hotspot | Total |
 |----------|---------|--------|---------|-------|
-| Hit duck, clean output, h=5 | +0.983 | 1.0 | no | +1.283 |
-| Hit duck, clean, h=5, **hotspot** | +0.983 | 1.0 | **yes** | **+0.642** |
-| Hit duck, verbose output, h=5 | +0.983 | 0.5 | no | +1.133 |
+| Hit duck, clean output, h=5 | +0.983 | 1.0 | none | +1.283 |
+| Hit duck, clean, h=5, **30% conc.** | +0.983 | 1.0 | scale=0.5 | **+0.642** |
+| Hit duck, clean, h=5, **50% conc.** | +0.983 | 1.0 | scale=-0.5 | **-0.642** |
+| Hit duck, verbose output, h=5 | +0.983 | 0.5 | none | +1.133 |
 | Close miss to flying duck (d=0.05), clean | -0.066 | 1.0 | — | +0.234 |
 | Close miss to dead duck (d=0.05), clean | -0.300 | 1.0 | — | +0.000 |
 | Far miss (d=0.5), clean | -0.275 | 1.0 | — | +0.025 |
 | Miss, no tool call | -1.0 | 0.0 | — | -1.000 |
 | Miss, verbose but parseable | -0.300 | 0.5 | — | -0.150 |
 | Duck escaped during horizon | -0.700 | 1.0 | — | -0.400 |
-| Double kill, h=0 | +2.500 | 1.0 | no | +2.800 |
-| Double kill, h=0, **hotspot** | +2.500 | 1.0 | **yes** | **+1.400** |
+| Double kill, h=0 | +2.500 | 1.0 | none | +2.800 |
+| Double kill, h=0, **40% conc.** | +2.500 | 1.0 | scale=0.0 | **0.000** |
 
 ### Key invariants
 
@@ -242,10 +250,11 @@ These must always hold for the reward system to provide correct learning signal:
 double_kill > hit > close_miss > far_miss > shoot_nothing > shoot_dead > invalid
   +2.5      +1.0    ~-0.1       ~-0.3       -0.5           -0.7        -1.0
 
-hit(h=30) > miss             →  lowest hit (0.9) still better than best miss (0.0)
-novel_hit > hotspot_hit      →  diverse aiming rewarded over position spam
-clean > verbose              →  format reward always higher for concise output
-invalid < miss               →  always better to produce a parseable tool call
+hit(h=30) > miss                   →  lowest hit (0.9) still better than best miss (0.0)
+novel_hit > hotspot_hit(30%)       →  diverse aiming rewarded over position spam
+hotspot_hit(50%) < miss            →  severe spam is worse than missing
+clean > verbose                    →  format reward always higher for concise output
+invalid < miss                     →  always better to produce a parseable tool call
 miss_near_flying > miss_near_dead  →  proximity only to alive ducks
 ```
 
@@ -271,13 +280,64 @@ If all 6 generations get the same reward (e.g. all miss by the same distance), `
 | Aiming at flying vs dead duck | proximity bonus (-0.1) vs no bonus (-0.3) = teaches target selection |
 | Format quality | clean (1.0) vs verbose (0.5) = moderate signal |
 | Dead duck penalty | miss (-0.3) vs escaped (-0.7) = useful signal for horizon tuning |
-| Hotspot penalty | novel hit (+1.0) vs repeated-position hit (+0.5) = discourages exploits |
+| Hotspot penalty | novel hit (+1.0) vs hotspot hit at 40% (0.0) = strong anti-exploit |
 
 ### Common failure mode
 
-If the model collapses to one output (e.g. always `shoot(x=0.5, y=0.5, horizon=8)`), all 6 generations get identical rewards. `std = 0`, advantages = 0, no gradient. The entropy mechanisms (see config) prevent this by encouraging diverse outputs. The hotspot penalty further discourages this by halving the reward for repeated positions.
+If the model collapses to one output (e.g. always `shoot(x=0.5, y=0.5, horizon=8)`), all 6 generations get identical rewards. `std = 0`, advantages = 0, no gradient. Multiple mechanisms prevent this:
+- Entropy bonus/floor keeps the policy stochastic
+- Hotspot penalty makes repeated-position hits negative at >40% concentration
+- New match every step ensures diverse duck positions (see section 6)
 
-## 6. Config Reference
+## 6. Environment Diversity
+
+The trainer forces **a new match every training step**. This means every step has fresh ducks with new random spawn positions, speeds, and directions. Without this, the same two ducks would persist for 15-60 steps while bouncing around, causing the model to see similar frames repeatedly.
+
+Each step:
+1. Advance to next match (new pair of ducks spawned off-screen)
+2. Advance 8-25 random frames (ducks enter the visible area)
+3. Verify at least 1 duck is flying
+4. Capture frames and train
+
+Additional diversity mechanisms:
+- Ducks spawn from left, right (40% each) or top (20%) edges
+- Per-duck speed with +/-20% individual variation
+- Random starting round (1-5) on reset — varied speed ranges
+- Mid-flight jitter: 3% chance per frame of direction nudge
+- Bounce speed jitter: +/-15% on wall bounce
+
+## 7. Curriculum Training
+
+Training is split into two phases to help the model learn incrementally:
+
+### Phase 1: Learn to aim (steps 0 to `curriculum_phase2_step`)
+
+- **Horizon clamped to 0**: whatever horizon the model outputs, the shot is simulated with `horizon=0`
+- **Shorter completions**: `phase1_max_completion_length` (default 30 tokens)
+- **Goal**: model learns to produce valid tool calls and aim at duck positions
+- **Difficulty**: easier — shot lands after processing latency only, no extra prediction needed
+
+### Phase 2: Learn horizon optimization (steps `curriculum_phase2_step` to end)
+
+- **Horizon unlocked**: model's predicted horizon is used in simulation
+- **Full completion length**: `max_completion_length` (default 40 tokens)
+- **Goal**: model learns to optimize when to shoot
+- **Difficulty**: harder — must predict future duck position
+
+### Why curriculum helps
+
+The model needs to learn three things simultaneously: tool call format, spatial aiming, and temporal prediction. Without curriculum, the model often gets stuck learning one (usually tool call format) while failing at the others, leading to collapse. Curriculum separates the easier task (aiming) from the harder one (timing).
+
+```yaml
+grpo:
+  curriculum_phase2_step: 2000    # 0 = disabled
+  phase1_max_completion_length: 30
+  max_completion_length: 40       # used in phase 2
+```
+
+W&B logs `train/curriculum_phase` (1 or 2) so you can see the transition.
+
+## 8. Config Reference
 
 ```yaml
 reward:
@@ -295,7 +355,7 @@ reward:
   max_horizon: 30            # max horizon for penalty normalization
 ```
 
-## 7. Tuning Guide
+## 9. Tuning Guide
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
@@ -306,6 +366,9 @@ reward:
 | All generations get same reward | Model collapsed, or proximity bonus too small | Increase `proximity_bonus`, check entropy config |
 | Hit rate plateau | Proximity decay too slow (bonus too easy) | Increase `proximity_decay` to 8.0 |
 | Model writes explanations | Format verbosity penalty too weak | Reduce format floor from 0.3 to 0.1 |
-| Model always shoots center | Hotspot penalty not triggered, or hitbox too large | Reduce `hotspot_radius`, reduce hitbox size |
+| Model always shoots center | Hotspot penalty threshold too high | Reduce concentration threshold or increase scale steepness |
 | Model ignores dead ducks | Working correctly — proximity only targets flying ducks | No fix needed |
 | Model shoots dead ducks | `shoot_dead_duck` penalty too weak | Increase to -0.9 |
+| Same duck positions every step | Environment not advancing to new match | Verify `auto_advance_to_next_match()` is called each step |
+| Hit rate stalls in phase 1 | Model learned aiming but needs horizon | Transition to phase 2 earlier (lower `curriculum_phase2_step`) |
+| Hit rate drops at phase 2 start | Normal — model adjusting to harder task | Let it run 500+ steps, should recover |

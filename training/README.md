@@ -154,6 +154,25 @@ For each game state:
 
 To compute rewards for the TRL path (offline dataset), the system captures a **snapshot** of the game state at each training sample — duck positions, velocities, RNG state. During reward evaluation, it restores this snapshot and deterministically simulates the shot, ensuring reproducible outcomes regardless of when the reward function is called.
 
+### Curriculum Training
+
+Training is split into two phases:
+
+1. **Phase 1** (steps 0–2000): horizon clamped to 0, shorter completions — model learns tool call format and (x, y) aiming
+2. **Phase 2** (steps 2000+): horizon unlocked — model learns to optimize prediction timing
+
+Configure with `grpo.curriculum_phase2_step: 2000` (set to 0 to disable).
+
+### Environment Diversity
+
+Each training step uses a **new match** with fresh ducks (different spawn positions, speeds, directions). Ducks spawn from left, right, or top edges with per-duck speed variation. Random starting rounds (1-5) ensure varied difficulty.
+
+### Hotspot Penalty
+
+An anti-exploit mechanism tracks recent shot positions. If the model repeatedly aims at the same spot, hits at that position receive scaled-down rewards (going negative at >40% concentration). This prevents the model from finding a single "lucky" position and spamming it.
+
+See [REWARD.md](REWARD.md) for full reward system documentation.
+
 ## Configuration
 
 Configs use a layered YAML system. The base config sets defaults; model-specific configs override them:
@@ -177,11 +196,12 @@ python train.py --config configs/liquidai_config.yaml \
 
 | Parameter | Ministral | LiquidAI (LoRA) | LiquidAI (Full) |
 |-----------|-----------|-----------------|------------------|
-| `training.learning_rate` | 5e-6 | 2e-5 | 5e-6 |
+| `training.learning_rate` | 5e-6 | 1e-5 | 5e-6 |
 | `training.per_device_train_batch_size` | 1 | 2 | 1 |
 | `training.gradient_accumulation_steps` | 8 | 4 | 8 |
 | `grpo.num_generations` | 4 | 6 | 4 |
-| `grpo.max_completion_length` | 256 | 128 | 128 |
+| `grpo.max_completion_length` | 256 | 40 | 40 |
+| `grpo.curriculum_phase2_step` | 0 | 2000 | 2000 |
 | `lora.r` | 16 | 16 | — |
 | `lora.lora_alpha` | 32 | 16 | — |
 

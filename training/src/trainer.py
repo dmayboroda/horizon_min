@@ -31,7 +31,7 @@ from transformers import get_scheduler
 from .config import FullConfig
 from .dataset import capture_snapshot, simulate_shot
 from .environment import DuckHuntEnvWrapper
-from .reward import compute_reward
+from .reward import compute_reward, compute_reward_detailed
 from .utils import Action, build_prompt, parse_tool_call
 
 logger = logging.getLogger(__name__)
@@ -365,6 +365,7 @@ class DuckHuntGRPOTrainer:
         completions_text = []
         parsed_actions = []
         hit_flags = []  # True if hit at least one duck
+        reward_breakdowns = []  # detailed reward components for W&B
 
         for i in range(G):
             comp_ids = output_ids[i, prompt_len:]
@@ -388,7 +389,9 @@ class DuckHuntGRPOTrainer:
             is_hit = result.get("hit_a", False) or result.get("hit_b", False)
             hit_flags.append(is_hit)
 
-            reward = compute_reward(result, action, self.cfg.reward)
+            bd = compute_reward_detailed(result, action, self.cfg.reward)
+            reward = bd.total
+            reward_breakdowns.append(bd)
 
             # Hotspot penalty — scaling penalty for repetitive coordinates
             # At 30% concentration: reward *= 0.0 (hit becomes worthless)
@@ -419,14 +422,18 @@ class DuckHuntGRPOTrainer:
                 if len(self._recent_shots) > self._hotspot_window:
                     self._recent_shots.pop(0)
 
-            # Log full completion to console
+            # Log full completion with reward breakdown to console
             action_str = f"x={action.x:.3f}, y={action.y:.3f}, h={action.horizon}" if action else "INVALID"
             hit_str = ""
             if action:
                 hit_str = f" hit_a={result['hit_a']} hit_b={result['hit_b']}"
+            dist_str = f" dist={bd.min_distance:.3f}" if bd.min_distance >= 0 else ""
+            prox_str = f" prox={bd.proximity_bonus:.3f}" if bd.proximity_bonus > 0 else ""
+            hpen_str = f" hpen={bd.horizon_penalty:.3f}" if bd.horizon_penalty > 0 else ""
             logger.info(
-                "  [gen %d] reward=%.2f action=%s%s\n    output: %s",
-                i, reward, action_str, hit_str, decoded,
+                "  [gen %d] reward=%.2f (base=%.2f%s%s%s) %s action=%s%s\n    output: %s",
+                i, reward, bd.base, hpen_str, prox_str, dist_str,
+                bd.outcome, action_str, hit_str, decoded,
             )
 
         # Render a "shot-time" frame showing where ducks are when shot lands
@@ -436,7 +443,7 @@ class DuckHuntGRPOTrainer:
         # Log frames and completions to W&B
         self._log_batch_to_wandb(
             frames, completions_text, rewards, parsed_actions, hit_flags,
-            shot_frame=shot_frame,
+            shot_frame=shot_frame, reward_breakdowns=reward_breakdowns,
         )
 
         # Advance the real environment (larger range for diverse states)
@@ -720,6 +727,7 @@ class DuckHuntGRPOTrainer:
         actions: list | None = None,
         hit_flags: list[bool] | None = None,
         shot_frame: Image.Image | None = None,
+        reward_breakdowns: list | None = None,
     ) -> None:
         """Log observation frames and shot-time frames with crosshairs to W&B.
 
@@ -796,12 +804,50 @@ class DuckHuntGRPOTrainer:
                         caption=f"All shots on {frame_type} frame: green=hit, red=miss",
                     )
 
-        # Log completions as a table
-        comp_table = wandb.Table(columns=["gen_idx", "completion", "reward", "hit"])
+        # Log completions table with reward breakdown
+        columns = [
+            "gen_idx", "completion", "reward", "hit", "outcome",
+            "base", "horizon_penalty", "proximity_bonus", "min_distance",
+        ]
+        comp_table = wandb.Table(columns=columns)
         for i, (text, reward) in enumerate(zip(completions, rewards)):
             is_hit = hit_flags[i] if hit_flags else False
-            comp_table.add_data(i, text, reward, is_hit)
+            if reward_breakdowns and i < len(reward_breakdowns):
+                bd = reward_breakdowns[i]
+                comp_table.add_data(
+                    i, text, reward, is_hit, bd.outcome,
+                    bd.base, bd.horizon_penalty, bd.proximity_bonus, bd.min_distance,
+                )
+            else:
+                comp_table.add_data(i, text, reward, is_hit, "", 0, 0, 0, -1)
         log_dict["train/completions"] = comp_table
+
+        # Log aggregate reward component metrics
+        if reward_breakdowns:
+            bds = reward_breakdowns
+            valid_bds = [b for b in bds if b.outcome != "invalid"]
+            miss_bds = [b for b in bds if b.outcome == "miss"]
+
+            log_dict["reward/mean_base"] = sum(b.base for b in bds) / max(len(bds), 1)
+            log_dict["reward/mean_proximity"] = (
+                sum(b.proximity_bonus for b in miss_bds) / max(len(miss_bds), 1)
+                if miss_bds else 0.0
+            )
+            log_dict["reward/mean_distance"] = (
+                sum(b.min_distance for b in miss_bds if b.min_distance >= 0)
+                / max(sum(1 for b in miss_bds if b.min_distance >= 0), 1)
+                if miss_bds else 0.0
+            )
+            log_dict["reward/mean_horizon_penalty"] = (
+                sum(b.horizon_penalty for b in bds) / max(len(bds), 1)
+            )
+
+            # Outcome counts
+            outcomes = [b.outcome for b in bds]
+            log_dict["reward/n_hits"] = outcomes.count("hit") + outcomes.count("double_kill")
+            log_dict["reward/n_misses"] = outcomes.count("miss")
+            log_dict["reward/n_invalid"] = outcomes.count("invalid")
+            log_dict["reward/n_shoot_dead"] = outcomes.count("shoot_dead")
 
         wandb.log(log_dict)
 

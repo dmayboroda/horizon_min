@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass, field
 
 from .config import RewardConfig
 from .utils import Action
@@ -16,74 +17,82 @@ def _distance(p1: tuple[float, float], p2: tuple[float, float]) -> float:
     return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
 
+@dataclass
+class RewardBreakdown:
+    """All components of a single reward computation."""
+    total: float = 0.0
+    base: float = 0.0             # hit/miss/double_kill/shoot_nothing/etc
+    horizon_penalty: float = 0.0
+    proximity_bonus: float = 0.0
+    min_distance: float = -1.0    # -1 = not computed
+    outcome: str = ""             # "hit", "miss", "double_kill", "invalid", etc
+    duck_a_state: str = ""
+    duck_b_state: str = ""
+
+
 def compute_reward(
     result: dict,
     action: Action | None,
     config: RewardConfig,
 ) -> float:
-    """Compute the scalar reward for a single step.
+    """Compute the scalar reward. Use compute_reward_detailed for breakdown."""
+    return compute_reward_detailed(result, action, config).total
 
-    Parameters
-    ----------
-    result : dict
-        Shot outcome from ``simulate_shot()``.  Expected keys:
 
-        * ``hit_a``  (bool) – duck A was hit
-        * ``hit_b``  (bool) – duck B was hit
-        * ``had_target`` (bool) – at least one duck was flying at observation time
-        * ``had_target_at_shot`` (bool) – at least one duck still flying when shot lands
-        * ``duck_a_pos`` (tuple) – normalised (x, y) of duck A after advancement
-        * ``duck_b_pos`` (tuple) – normalised (x, y) of duck B after advancement
-        * ``duck_a_state`` (str) – state of duck A after advancement
-        * ``duck_b_state`` (str) – state of duck B after advancement
-        * ``shot_pos`` (tuple) – normalised (x, y) of the shot
-    action : Action | None
-        The parsed action, or ``None`` if the model's output could not be
-        parsed into a valid tool call.
-    config : RewardConfig
-        Reward hyper-parameters.
+def compute_reward_detailed(
+    result: dict,
+    action: Action | None,
+    config: RewardConfig,
+) -> RewardBreakdown:
+    """Compute reward with full breakdown of all components."""
+    bd = RewardBreakdown()
 
-    Returns
-    -------
-    float
-        The total reward.
-    """
     # ---- unparseable output ----
     if action is None:
-        return config.invalid_action
+        bd.total = config.invalid_action
+        bd.base = config.invalid_action
+        bd.outcome = "invalid"
+        return bd
 
     hit_a: bool = result.get("hit_a", False)
     hit_b: bool = result.get("hit_b", False)
     had_target: bool = result.get("had_target", False)
     had_target_at_shot: bool = result.get("had_target_at_shot", had_target)
+    bd.duck_a_state = result.get("duck_a_state", "unknown")
+    bd.duck_b_state = result.get("duck_b_state", "unknown")
 
     # ---- no ducks were flying at observation time ----
     if not had_target:
-        return config.shoot_nothing
+        bd.total = config.shoot_nothing
+        bd.base = config.shoot_nothing
+        bd.outcome = "shoot_nothing"
+        return bd
 
     # ---- ducks escaped/fell during latency+horizon (shot too late) ----
     if not had_target_at_shot and not (hit_a or hit_b):
-        return config.shoot_dead_duck
+        bd.total = config.shoot_dead_duck
+        bd.base = config.shoot_dead_duck
+        bd.outcome = "shoot_dead"
+        return bd
 
     # ---- base reward by outcome ----
     if hit_a and hit_b:
-        base = config.double_kill
+        bd.base = config.double_kill
+        bd.outcome = "double_kill"
     elif hit_a or hit_b:
-        base = config.hit
+        bd.base = config.hit
+        bd.outcome = "hit"
     else:
-        base = config.miss
+        bd.base = config.miss
+        bd.outcome = "miss"
 
-    # ---- horizon penalty (only on hits — reward minimizing horizon) ----
+    # ---- horizon penalty (only on hits) ----
     if hit_a or hit_b:
-        penalty = config.lambda_horizon * (
+        bd.horizon_penalty = config.lambda_horizon * (
             action.horizon / max(config.max_horizon, 1)
         )
-    else:
-        penalty = 0.0
 
-    # ---- proximity bonus (on misses — gives gradient signal) ----
-    # Only measure distance to FLYING ducks — reward aiming at alive targets
-    proximity = 0.0
+    # ---- proximity bonus (on misses, flying ducks only) ----
     if not (hit_a or hit_b) and config.proximity_bonus > 0:
         shot_pos = result.get("shot_pos")
         duck_a_pos = result.get("duck_a_pos")
@@ -99,9 +108,10 @@ def compute_reward(
                 distances.append(_distance(shot_pos, duck_b_pos))
 
             if distances:
-                min_dist = min(distances)
-                proximity = config.proximity_bonus * math.exp(
-                    -config.proximity_decay * min_dist
+                bd.min_distance = min(distances)
+                bd.proximity_bonus = config.proximity_bonus * math.exp(
+                    -config.proximity_decay * bd.min_distance
                 )
 
-    return base - penalty + proximity
+    bd.total = bd.base - bd.horizon_penalty + bd.proximity_bonus
+    return bd

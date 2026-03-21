@@ -65,21 +65,27 @@ A horizon penalty (`-0.1 * horizon/30`) on successful hits encourages the model 
 | Hit one duck | +1.0 |
 | Double kill | +2.5 |
 | Miss | -0.3 |
+| Shot dead/escaped duck | -0.7 |
 | No target | -0.5 |
 | Invalid output | -1.0 |
 | Horizon penalty | -0.1 x (horizon / 30) on hits |
 
-Two reward signals are combined: **accuracy** (did the shot hit?) and **format** (is the output a valid tool call?).
+Two reward signals are combined: **accuracy** (did the shot hit?) and **format** (is the output a valid tool call?). See [training/REWARD.md](training/REWARD.md) for full documentation.
 
 **Format reward with verbosity penalty**: The format reward scores output quality on a scale of 0.0–1.0. A clean tool call with no extra text gets 1.0. If the model generates explanations or filler around a valid tool call, the reward is penalized proportionally (down to a floor of 0.3). No parseable tool call at all gets 0.0.
 
-**Proximity bonus**: On misses, the reward includes a distance-based bonus that gives gradient signal even when the shot doesn't land — closer misses get a higher bonus via exponential decay (`0.3 * exp(-5.0 * dist)`).
+**Proximity bonus (target-aware)**: On misses, a distance-based bonus gives gradient signal toward **flying** ducks only — aiming near a falling/dead duck gives no bonus. Uses exponential decay (`0.3 * exp(-5.0 * dist)`).
+
+**Hotspot penalty**: Tracks recent shot positions. If the model repeatedly aims at the same spot, hits there get scaled-down rewards — going negative at >40% concentration. Prevents the model from exploiting a single "lucky" position.
+
+**Curriculum training**: Two-phase approach — phase 1 (steps 0–2000) clamps horizon to 0 so the model focuses on learning (x, y) aiming. Phase 2 (steps 2000+) unlocks horizon for temporal prediction optimization.
 
 **Anti-collapse measures**: Several mechanisms prevent the model from collapsing to a single fixed prediction:
 - **Entropy bonus** (`-entropy_coeff * H`) in the GRPO loss keeps the policy stochastic
-- **Entropy floor** — if entropy drops below a threshold (e.g. 1.0), an extra penalty kicks in as an emergency brake
+- **Entropy floor** — if entropy drops below a threshold, an extra penalty kicks in as an emergency brake
 - **KL penalty** (`beta * KL(policy || reference)`) anchors the model to its original behavior
 - **Randomized few-shot examples** — the few-shot values in the prompt change every step so the model can't memorize them
+- **New match every step** — fresh ducks with random positions/speeds each training step
 
 ### Training Setup
 
