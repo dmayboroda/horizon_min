@@ -349,25 +349,44 @@ Training is split into two phases to help the model learn incrementally:
 
 ### Phase 1: Learn to aim (steps 0 to `curriculum_phase2_step`)
 
-- **Horizon clamped to 0**: whatever horizon the model outputs, the shot is simulated with `horizon=0`
-- **Shorter completions**: `phase1_max_completion_length` (default 30 tokens)
+- **No horizon in tool schema** (LiquidAI): the tool call is `shoot(x, y)` only — horizon parameter is completely removed from the schema, system prompt, and few-shot example. The model focuses entirely on learning format and spatial aiming.
+- **Horizon always 0**: even if the model somehow outputs a horizon value, it is ignored and set to 0.
+- **Shorter completions**: `phase1_max_completion_length` (default 30 tokens) — the simpler tool call `shoot(x=0.5, y=0.3)` needs fewer tokens than `shoot(x=0.5, y=0.3, horizon=8)`.
+- **System prompt**: "Predict where the duck will be after latency frames." (no mention of horizon)
 - **Goal**: model learns to produce valid tool calls and aim at duck positions
 - **Difficulty**: easier — shot lands after processing latency only, no extra prediction needed
+- **Recommended duration**: 10,000–15,000 steps. The model needs enough steps to reach a solid hit rate (30%+) before horizon is introduced.
 
 ### Phase 2: Learn horizon optimization (steps `curriculum_phase2_step` to end)
 
+- **Horizon added to tool schema**: the tool call becomes `shoot(x, y, horizon)`. The schema, system prompt, and few-shot are all updated to include horizon.
 - **Horizon unlocked**: model's predicted horizon is used in simulation
-- **Full completion length**: `max_completion_length` (default 40 tokens)
+- **Full completion length**: `max_completion_length` (default 40 tokens) — room for the longer tool call with horizon
+- **System prompt**: "Predict where the duck will be after latency + horizon frames."
 - **Goal**: model learns to optimize when to shoot
 - **Difficulty**: harder — must predict future duck position
+
+### Phase transition details (LiquidAI)
+
+| Aspect | Phase 1 | Phase 2 |
+|--------|---------|---------|
+| Tool schema | `shoot(x, y)` | `shoot(x, y, horizon)` |
+| System prompt | "after latency frames" | "after latency + horizon frames" |
+| Few-shot | `[shoot(x=0.45, y=0.32)]` | `[shoot(x=0.45, y=0.32, horizon=8)]` |
+| Max tokens | 30 | 40 |
+| Horizon in reward | always 0 | model's predicted value |
+
+Note: Mistral format does not change between phases (horizon is always present in the schema). The phase-aware tool schema is LiquidAI-specific.
 
 ### Why curriculum helps
 
 The model needs to learn three things simultaneously: tool call format, spatial aiming, and temporal prediction. Without curriculum, the model often gets stuck learning one (usually tool call format) while failing at the others, leading to collapse. Curriculum separates the easier task (aiming) from the harder one (timing).
 
+Without Phase 1, the model tends to learn a degenerate strategy: shoot center with high horizon and hope ducks wander into the shot. With 10k+ steps of horizon-free Phase 1, the model is forced to learn actual duck tracking before horizon is introduced.
+
 ```yaml
 grpo:
-  curriculum_phase2_step: 2000    # 0 = disabled
+  curriculum_phase2_step: 15000   # 0 = disabled; recommended 10000-15000
   phase1_max_completion_length: 30
   max_completion_length: 40       # used in phase 2
 ```
@@ -397,10 +416,10 @@ After `stabilization_steps`, accumulation reverts to the normal value (default 4
 ### Timeline
 
 ```
-Step 0                50              500              2000          end
-  |--- LoRA frozen ---|--- stabilization (grad_accum=8) ---|
-  |---------------- warmup (LR ramp) ---------|
-  |----------------------- Phase 1 (horizon=0) -----------|-- Phase 2 --|
+Step 0        50          500                          15000              25000
+  |-- frozen --|--- stabilization (grad_accum=8) ---|
+  |------------ warmup (LR ramp) ----------|
+  |------------ Phase 1: shoot(x, y) only ---------|-- Phase 2: shoot(x, y, horizon) --|
 ```
 
 ### W&B tracking
@@ -421,7 +440,48 @@ training:
   warmup_ratio: 0.10
 ```
 
-## 11. Config Reference
+## 11. Training Usage
+
+### Single run (recommended)
+
+```bash
+python train.py --config configs/liquidai_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000
+```
+
+Phase 1 (steps 0–14999): `shoot(x, y)` only, no horizon. Phase 2 (steps 15000–24999): `shoot(x, y, horizon)`.
+
+### Two separate runs
+
+Phase 1 — train aiming only:
+```bash
+python train.py --config configs/liquidai_config.yaml --custom \
+    --override training.max_steps=15000 \
+    --override grpo.curriculum_phase2_step=99999
+```
+
+Check W&B, verify hit rate is good (30%+). Then Phase 2 — resume with horizon:
+```bash
+python train.py --config configs/liquidai_config.yaml --custom \
+    --override training.max_steps=10000 \
+    --override grpo.curriculum_phase2_step=0 \
+    --resume outputs/lfm25_duckhunt_grpo_v4/checkpoint-14999
+```
+
+Setting `curriculum_phase2_step=0` disables curriculum, so horizon is active from step 0 of the resumed run.
+
+### CLI overrides
+
+Any config value can be overridden with `--override section.key=value`:
+```bash
+--override grpo.curriculum_phase2_step=10000
+--override training.learning_rate=3e-5
+--override grpo.num_generations=8
+--override reward.lambda_horizon=0.3
+```
+
+## 12. Config Reference
 
 ```yaml
 reward:
@@ -438,9 +498,20 @@ reward:
   format_weight: 0.3         # weight for format reward in total
   accuracy_weight: 1.0       # weight for accuracy reward in total
   max_horizon: 30            # max horizon for penalty normalization
+
+grpo:
+  curriculum_phase2_step: 15000    # 0 = disabled; step to unlock horizon
+  phase1_max_completion_length: 30 # shorter completions in phase 1
+  max_completion_length: 40        # full completions in phase 2
+  stabilization_steps: 500         # 0 = disabled; boosted grad_accum duration
+  stabilization_grad_accum: 8      # grad_accum during stabilization
+  lora_freeze_steps: 50            # 0 = disabled; freeze LoRA for N steps
+
+training:
+  warmup_ratio: 0.10               # LR warmup fraction of total optimizer steps
 ```
 
-## 12. Tuning Guide
+## 13. Tuning Guide
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
