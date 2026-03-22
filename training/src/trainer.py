@@ -295,6 +295,9 @@ class DuckHuntGRPOTrainer:
             # Curriculum phase transition
             if self._curriculum_enabled:
                 if step >= self._phase2_step and self._current_phase == 1:
+                    # Save Phase 1 checkpoint before transitioning
+                    logger.info("Saving Phase 1 checkpoint at step %d ...", step)
+                    self._save_phase_checkpoint(phase=1, step=step)
                     self._current_phase = 2
                     logger.info(
                         "=== CURRICULUM: switching to phase 2 (horizon unlocked) at step %d ===",
@@ -360,13 +363,10 @@ class DuckHuntGRPOTrainer:
                         self.best_eval_hit_rate = hit_rate
                         self._save_best_checkpoint(step, eval_metrics)
 
-        # Final save
+        # Final save — Phase 2 (or Phase 1 if curriculum disabled)
         self._save_checkpoint(total_steps - 1, {})
+        self._save_phase_checkpoint(phase=self._current_phase, step=total_steps - 1)
         logger.info("Training complete after %d steps.", total_steps)
-
-        # Push to HF Hub
-        if cfg.hub.push_to_hub:
-            self.push_to_hub()
 
     # ------------------------------------------------------------------
     #  Collect batch
@@ -1112,6 +1112,36 @@ class DuckHuntGRPOTrainer:
             self.best_eval_hit_rate * 100, step + 1,
         )
 
+    def _save_phase_checkpoint(self, phase: int, step: int) -> None:
+        """Save a phase checkpoint and push to Hub if configured.
+
+        Phase checkpoints are NOT subject to checkpoint rotation (save_total_limit)
+        so they persist for the entire run.
+        """
+        phase_dir = Path(self.cfg.training.output_dir) / f"phase{phase}_checkpoint"
+        phase_dir.mkdir(parents=True, exist_ok=True)
+
+        self.model.save_pretrained(str(phase_dir))
+        self.processor.save_pretrained(str(phase_dir))
+
+        trainer_state = {
+            "global_step": self.global_step,
+            "step": step + 1,
+            "phase": phase,
+            "hit_rate": self._total_hits / max(self._total_shots, 1),
+            "total_hits": self._total_hits,
+            "total_shots": self._total_shots,
+        }
+        with open(phase_dir / "trainer_state.json", "w") as f:
+            json.dump(trainer_state, f, indent=2)
+
+        logger.info("Phase %d checkpoint saved to %s", phase, phase_dir)
+
+        # Push to Hub (same repo, same branch — latest phase overwrites)
+        if self.cfg.hub.push_to_hub and self.cfg.hub.hub_model_id:
+            logger.info("Pushing phase %d checkpoint to Hub: %s", phase, self.cfg.hub.hub_model_id)
+            self.push_to_hub(checkpoint_dir=str(phase_dir))
+
     def _load_checkpoint(self, checkpoint_dir: str) -> int:
         """Resume training from a saved checkpoint.
 
@@ -1158,7 +1188,7 @@ class DuckHuntGRPOTrainer:
     # ------------------------------------------------------------------
     #  Hugging Face Hub upload
     # ------------------------------------------------------------------
-    def push_to_hub(self, checkpoint_dir: str | None = None) -> None:
+    def push_to_hub(self, checkpoint_dir: str | None = None, repo_id_override: str | None = None) -> None:
         """Push model checkpoint to Hugging Face Hub.
 
         Parameters
@@ -1167,11 +1197,13 @@ class DuckHuntGRPOTrainer:
             Path to the checkpoint to upload.  Defaults to
             ``best_checkpoint`` if it exists, otherwise the latest
             checkpoint in the output directory.
+        repo_id_override : str, optional
+            Override the Hub repo ID (e.g. for phase-specific uploads).
         """
         from huggingface_hub import HfApi, ModelCard, ModelCardData
 
         hub = self.cfg.hub
-        repo_id = hub.hub_model_id
+        repo_id = repo_id_override or hub.hub_model_id
         if not repo_id:
             logger.warning("hub.hub_model_id is not set — skipping push_to_hub.")
             return
