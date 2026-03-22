@@ -95,12 +95,20 @@ class DuckHuntGRPOTrainer:
         )
 
         total_steps = train.max_steps if train.max_steps > 0 else 1000
-        warmup_steps = int(total_steps * train.warmup_ratio)
+        # Scheduler operates on optimizer steps (every grad_accum loop steps),
+        # not raw loop steps. Use normal grad_accum for the estimate since
+        # stabilization only affects a small prefix.
+        total_optimizer_steps = total_steps // train.gradient_accumulation_steps
+        warmup_optimizer_steps = int(total_optimizer_steps * train.warmup_ratio)
         self.scheduler = get_scheduler(
             train.lr_scheduler_type,
             optimizer=self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps,
+            num_warmup_steps=warmup_optimizer_steps,
+            num_training_steps=total_optimizer_steps,
+        )
+        logger.info(
+            "Scheduler: %d optimizer steps, %d warmup steps (from %d loop steps, grad_accum=%d)",
+            total_optimizer_steps, warmup_optimizer_steps, total_steps, train.gradient_accumulation_steps,
         )
 
         self.device = next(model.parameters()).device
@@ -387,8 +395,8 @@ class DuckHuntGRPOTrainer:
         else:
             logger.warning("Could not find flying ducks after new match, using current state")
 
-        # Build prompt
-        messages, tools = build_prompt(frames, state)
+        # Build prompt (phase 1 = no horizon in tool schema for LiquidAI)
+        messages, tools = build_prompt(frames, state, phase=self._current_phase)
 
         # Snapshot for deterministic reward
         snap = capture_snapshot(self.env)
@@ -439,11 +447,11 @@ class DuckHuntGRPOTrainer:
 
             decoded = self.processor.decode(comp_ids, skip_special_tokens=False)
             completions_text.append(decoded)
-            action = parse_tool_call(decoded, max_horizon=self.cfg.environment.max_horizon)
-
-            # Phase 1: clamp horizon to 0 (model only learns x, y)
-            if action is not None and self._current_phase == 1:
-                action = Action(x=action.x, y=action.y, horizon=0)
+            action = parse_tool_call(
+                decoded,
+                max_horizon=self.cfg.environment.max_horizon,
+                phase=self._current_phase,
+            )
 
             parsed_actions.append(action)
 

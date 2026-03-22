@@ -56,7 +56,7 @@ class ModelFormat(ABC):
     """Interface that each model family must implement."""
 
     @abstractmethod
-    def get_tools(self) -> list[dict]:
+    def get_tools(self, phase: int = 2) -> list[dict]:
         """Tool definitions for ``processor.apply_chat_template(tools=…)``."""
 
     @abstractmethod
@@ -65,6 +65,7 @@ class ModelFormat(ABC):
         frames: list[Image.Image],
         state: dict,
         num_frames: int | None = None,
+        phase: int = 2,
     ) -> tuple[list[dict], list[dict]]:
         """Build (messages, tools) for the processor."""
 
@@ -73,6 +74,7 @@ class ModelFormat(ABC):
         self,
         output_text: str,
         max_horizon: int = 30,
+        phase: int = 2,
     ) -> Action | None:
         """Parse model output into an Action."""
 
@@ -184,7 +186,7 @@ class MistralFormat(ModelFormat):
         },
     }
 
-    def get_tools(self) -> list[dict]:
+    def get_tools(self, phase: int = 2) -> list[dict]:
         return [self.TOOL_SCHEMA]
 
     def _make_fewshot(self) -> str:
@@ -195,12 +197,13 @@ class MistralFormat(ModelFormat):
             f'{{"x": {x}, "y": {y}, "horizon": {h}}}, "id": "{call_id}"}}]'
         )
 
-    def build_prompt(self, frames, state, num_frames=None):
+    def build_prompt(self, frames, state, num_frames=None, phase: int = 2):
         if num_frames is None:
             num_frames = len(frames)
         latency_frames = state.get("simulated_latency_frames", 6)
         system_prompt = format_system_prompt(
             num_frames=num_frames, processing_latency_frames=latency_frames,
+            phase=phase,
         )
         user_content = self._build_user_content(frames, state, latency_frames, num_frames)
 
@@ -213,9 +216,9 @@ class MistralFormat(ModelFormat):
             {"role": "assistant", "content": [{"type": "text", "text": self._make_fewshot()}]},
             {"role": "user", "content": user_content},
         ]
-        return messages, self.get_tools()
+        return messages, self.get_tools(phase=phase)
 
-    def parse_tool_call(self, output_text, max_horizon=30):
+    def parse_tool_call(self, output_text, max_horizon=30, phase: int = 2):
         # --- Mistral [TOOL_CALLS] [{"name": "shoot", ...}] ---
         tc_match = re.search(r"\[TOOL_CALLS\]\s*(\[.*\])", output_text, re.DOTALL)
         if tc_match:
@@ -291,19 +294,51 @@ class LiquidAIFormat(ModelFormat):
         },
     }
 
-    def get_tools(self) -> list[dict]:
+    # Phase 1: no horizon parameter — model only learns (x, y) aiming
+    TOOL_SCHEMA_PHASE1 = {
+        "name": "shoot",
+        "description": (
+            "Fire at predicted duck position. "
+            "Analyze the frame sequence to estimate duck velocity, "
+            "then predict where the duck will be after "
+            "processing_latency_frames frames."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "number",
+                    "description": "Predicted horizontal position, normalised 0.0-1.0. 0.0 = left edge, 1.0 = right edge.",
+                    "minimum": 0.0, "maximum": 1.0,
+                },
+                "y": {
+                    "type": "number",
+                    "description": "Predicted vertical position, normalised 0.0-1.0. 0.0 = top edge, 1.0 = bottom edge.",
+                    "minimum": 0.0, "maximum": 1.0,
+                },
+            },
+            "required": ["x", "y"],
+        },
+    }
+
+    def get_tools(self, phase: int = 2) -> list[dict]:
+        if phase == 1:
+            return [self.TOOL_SCHEMA_PHASE1]
         return [self.TOOL_SCHEMA]
 
-    def _make_fewshot(self) -> str:
+    def _make_fewshot(self, phase: int = 2) -> str:
         x, y, h = _random_fewshot_values()
+        if phase == 1:
+            return f"<|tool_call_start|>[shoot(x={x}, y={y})]<|tool_call_end|>"
         return f"<|tool_call_start|>[shoot(x={x}, y={y}, horizon={h})]<|tool_call_end|>"
 
-    def build_prompt(self, frames, state, num_frames=None):
+    def build_prompt(self, frames, state, num_frames=None, phase: int = 2):
         if num_frames is None:
             num_frames = len(frames)
         latency_frames = state.get("simulated_latency_frames", 5)
         system_prompt = format_system_prompt(
             num_frames=num_frames, processing_latency_frames=latency_frames,
+            phase=phase,
         )
         user_content = self._build_user_content(frames, state, latency_frames, num_frames)
 
@@ -313,12 +348,12 @@ class LiquidAIFormat(ModelFormat):
                 "Frame sequence: 4 frames. Ducks flying: 2. "
                 "Latency: 5 frames. Call the shoot tool now."
             )}]},
-            {"role": "assistant", "content": [{"type": "text", "text": self._make_fewshot()}]},
+            {"role": "assistant", "content": [{"type": "text", "text": self._make_fewshot(phase=phase)}]},
             {"role": "user", "content": user_content},
         ]
-        return messages, self.get_tools()
+        return messages, self.get_tools(phase=phase)
 
-    def parse_tool_call(self, output_text, max_horizon=30):
+    def parse_tool_call(self, output_text, max_horizon=30, phase: int = 2):
         # --- LiquidAI <|tool_call_start|>[shoot(...)]<|tool_call_end|> ---
         liq_match = re.search(
             r"(?:<\|tool_call_start\|>|tool_call_start)"
@@ -327,14 +362,14 @@ class LiquidAIFormat(ModelFormat):
             output_text, re.DOTALL | re.IGNORECASE,
         )
         if liq_match:
-            return self._parse_kwargs(liq_match.group(1), max_horizon)
+            return self._parse_kwargs(liq_match.group(1), max_horizon, phase=phase)
 
         # --- Plain pythonic shoot(...) without special tokens ---
         py_match = re.search(
             r"shoot\s*\((.*?)\)", output_text, re.DOTALL | re.IGNORECASE,
         )
         if py_match:
-            return self._parse_kwargs(py_match.group(1), max_horizon)
+            return self._parse_kwargs(py_match.group(1), max_horizon, phase=phase)
 
         # No JSON or KV fallbacks — LiquidAI must use pythonic format.
         # Mistral-style JSON (e.g. [{"name":"shoot","arguments":{...}}])
@@ -343,18 +378,24 @@ class LiquidAIFormat(ModelFormat):
         return None
 
     @staticmethod
-    def _parse_kwargs(args_str: str, max_horizon: int) -> Action | None:
-        # Try keyword args first: shoot(x=0.5, y=0.3, horizon=8)
+    def _parse_kwargs(args_str: str, max_horizon: int, phase: int = 2) -> Action | None:
+        # Try keyword args first: shoot(x=0.5, y=0.3) or shoot(x=0.5, y=0.3, horizon=8)
         vals = {}
         for match in re.finditer(r"(\w+)\s*=\s*([0-9.eE+-]+)", args_str):
             vals[match.group(1)] = match.group(2)
         if "x" in vals and "y" in vals:
-            return _build_action(vals["x"], vals["y"], vals.get("horizon", "0"), max_horizon)
+            # Phase 1: ignore any horizon value, always 0
+            horizon = "0" if phase == 1 else vals.get("horizon", "0")
+            return _build_action(vals["x"], vals["y"], horizon, max_horizon)
 
-        # Fallback: positional args: shoot(0.5, 0.3, 8)
+        # Fallback: positional args: shoot(0.5, 0.3) or shoot(0.5, 0.3, 8)
         nums = re.findall(r"\d+\.?\d*(?:[eE][+-]?\d+)?", args_str)
         if len(nums) >= 2:
-            horizon = nums[2] if len(nums) >= 3 else "0"
+            # Phase 1: ignore any horizon value, always 0
+            if phase == 1:
+                horizon = "0"
+            else:
+                horizon = nums[2] if len(nums) >= 3 else "0"
             try:
                 return _build_action(nums[0], nums[1], horizon, max_horizon)
             except (ValueError, TypeError):

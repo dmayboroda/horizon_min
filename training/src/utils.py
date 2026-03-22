@@ -36,14 +36,25 @@ Predict where the duck will be after latency + horizon frames.
 
 IMPORTANT: Respond ONLY with the tool call. Do NOT explain your reasoning."""
 
+SYSTEM_PROMPT_PHASE1_TEMPLATE = """\
+You are a Duck Hunt AI. Shoot flying ducks by calling the shoot tool.
+
+You see {num_frames} frames. Latency: {processing_latency_frames} frames.
+Coordinates: x (0=left, 1=right), y (0=top, 1=bottom).
+Predict where the duck will be after latency frames.
+
+IMPORTANT: Respond ONLY with the tool call. Do NOT explain your reasoning."""
+
 
 def format_system_prompt(
     *,
     num_frames: int = 4,
     processing_latency_frames: int = 6,
+    phase: int = 2,
 ) -> str:
     """Return the system prompt with placeholders filled in."""
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    template = SYSTEM_PROMPT_PHASE1_TEMPLATE if phase == 1 else SYSTEM_PROMPT_TEMPLATE
+    return template.format(
         num_frames=num_frames,
         processing_latency_frames=processing_latency_frames,
     )
@@ -128,16 +139,18 @@ def build_prompt(
     frames: list[Image.Image],
     state: dict,
     num_frames: int | None = None,
+    phase: int = 2,
 ) -> tuple[list[dict], list[dict]]:
     """Build chat messages and tools list — delegates to the active format."""
     fmt = _ensure_format()
-    return fmt.build_prompt(frames, state, num_frames)
+    return fmt.build_prompt(frames, state, num_frames, phase=phase)
 
 
 def parse_tool_call(
     output_text: str,
     max_horizon: int = 30,
+    phase: int = 2,
 ) -> Action | None:
     """Parse model output into an Action — delegates to the active format."""
     fmt = _ensure_format()
-    return fmt.parse_tool_call(output_text, max_horizon)
+    return fmt.parse_tool_call(output_text, max_horizon, phase=phase)
