@@ -28,7 +28,7 @@ from config import (
 class DuckHuntEnvironment:
     """OpenEnv-compatible Duck Hunt environment."""
 
-    def __init__(self, output_size: tuple[int, int] = FRAME_OUTPUT_SIZE):
+    def __init__(self, output_size: tuple[int, int] = FRAME_OUTPUT_SIZE, num_frames: int | None = None, frame_skip: int | None = None):
         # Game state
         self.round: Round | None = None
         self.round_number: int = 1
@@ -38,6 +38,10 @@ class DuckHuntEnvironment:
         # Renderer with configurable output size
         self.output_size = output_size
         self.renderer = Renderer(output_size=output_size)
+
+        # Configurable number of observation frames and skip between them
+        self.num_frames = num_frames if num_frames is not None else FRAMES_PER_OBSERVATION
+        self.frame_skip = frame_skip if frame_skip is not None else FRAME_SKIP
 
         # Frame buffer (last N frames as base64)
         self.frame_buffer: list[str] = []
@@ -62,13 +66,13 @@ class DuckHuntEnvironment:
         self.frame_buffer = []
 
         # Render initial frames (with skip for visible duck displacement)
-        for i in range(FRAMES_PER_OBSERVATION):
+        for i in range(self.num_frames):
             game_state = self.round.current_match.get_state()
             image = self.renderer.render_and_resize(game_state, self.frame_counter)
             frame_b64 = self.renderer.image_to_base64(image)
             self.frame_buffer.append(frame_b64)
             # Advance by FRAME_SKIP between captures (1 after last to not waste frames)
-            advance = FRAME_SKIP if i < FRAMES_PER_OBSERVATION - 1 else 1
+            advance = self.frame_skip if i < self.num_frames - 1 else 1
             self.round.current_match.advance_frames(advance)
             self.frame_counter += advance
 
@@ -221,11 +225,11 @@ class DuckHuntEnvironment:
         """Render new frames and update buffer (with skip for visible displacement)."""
         self.frame_buffer = []
 
-        for i in range(FRAMES_PER_OBSERVATION):
+        for i in range(self.num_frames):
             game_state = self.round.current_match.get_state()
             image = self.renderer.render_and_resize(game_state, self.frame_counter)
             frame_b64 = self.renderer.image_to_base64(image)
             self.frame_buffer.append(frame_b64)
-            advance = FRAME_SKIP if i < FRAMES_PER_OBSERVATION - 1 else 1
+            advance = self.frame_skip if i < self.num_frames - 1 else 1
             self.round.current_match.advance_frames(advance)
             self.frame_counter += advance

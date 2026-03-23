@@ -61,6 +61,8 @@ class DuckHuntEnvWrapper:
 
         self._env = DuckHuntEnvironment(
             output_size=tuple(config.frame_output_size),
+            num_frames=config.frames_per_observation,
+            frame_skip=config.frame_skip,
         )
 
         # ---- episode stats (reset each episode) ----

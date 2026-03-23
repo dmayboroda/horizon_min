@@ -31,8 +31,8 @@ model:
 
 lora:
   enabled: true
-  r: 16
-  lora_alpha: 16
+  r: 32
+  lora_alpha: 32
   lora_dropout: 0.0
   target_modules:
     - q_proj
@@ -93,9 +93,10 @@ training:
 
 environment:
   latency_options_ms: [100, 150, 200, 250, 300]
-  frames_per_observation: 4
+  frames_per_observation: 2
   frames_per_observation_min: 2
-  frames_per_observation_max: 10
+  frames_per_observation_max: 4
+  frame_skip: 6                            # wider gap between frames — same trajectory span as 4 frames with skip=3
 
 reward:
   hit: 1.0

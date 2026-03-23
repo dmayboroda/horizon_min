@@ -28,6 +28,7 @@ class EnvironmentConfig:
     frames_per_observation: int = 4
     frames_per_observation_min: int = 2
     frames_per_observation_max: int = 6
+    frame_skip: int = 3  # game frames to skip between observation frames
 
     # Game timing
     fps: int = 30
