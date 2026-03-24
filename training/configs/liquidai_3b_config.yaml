@@ -49,8 +49,8 @@ grpo:
   epsilon: 0.2
   loss_type: "grpo"
   scale_rewards: "group"
-  entropy_coeff: 0.002
-  entropy_floor: 0.3
+  entropy_coeff: 0.01                      # 3B model is too deterministic (entropy ~0.4), needs exploration push
+  entropy_floor: 0.0
   entropy_floor_coeff: 0.0
   # Curriculum: phase 1 = learn (x,y), phase 2 = learn horizon
   curriculum_phase2_step: 15000
@@ -96,9 +96,9 @@ reward:
   miss: -0.3
   shoot_nothing: -0.5
   lambda_horizon: 0.1
-  proximity_bonus: 0.5
-  proximity_decay: 3.0
-  format_weight: 0.3
+  proximity_bonus: 0.3                     # less generous — 3B model learns from hits, not near-misses
+  proximity_decay: 8.0                     # sharp gradient — only reward very close misses
+  format_weight: 0.5                       # stronger format pressure — penalize safety refusals harder
   accuracy_weight: 1.0
 
 logging:
