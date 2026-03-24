@@ -23,30 +23,30 @@ SPRITE_WIDTH = 81
 SPRITE_HEIGHT = 75
 
 # Hit detection box (centered on sprite)
-HITBOX_WIDTH = 50   # ~6.25% of screen width
-HITBOX_HEIGHT = 45  # ~9% of screen height
-SPEED_BASE = 6  # Minimum speed component (was 4 — faster ducks)
-SPEED_VARIANCE = 4  # Added to base (was 2 — wider speed range)
+HITBOX_WIDTH = 80   # ~10% of screen width — forgiving but not larger than sprite
+HITBOX_HEIGHT = 70  # ~14% of screen height
+SPEED_BASE = 3  # Slow ducks — easier to predict
+SPEED_VARIANCE = 2  # Minimal speed range
 # Speed = BASE+round to BASE+VARIANCE+round
-# Round 1: 7–11 px/frame (was 5–7)
+# Round 1: 4–6 px/frame (slow, predictable)
 
 # SPAWN (ducks always enter from off-screen edges)
-SPAWN_Y_MIN_FRAC = 0.15  # normalised min Y for spawn height (higher spawn possible)
-SPAWN_Y_MAX_FRAC = 0.85  # normalised max Y for spawn height (avoid dog area)
+SPAWN_Y_MIN_FRAC = 0.20  # normalised min Y for spawn height
+SPAWN_Y_MAX_FRAC = 0.70  # normalised max Y — keep ducks in visible area
 
-# MID-FLIGHT JITTER (makes trajectories less predictable)
-JITTER_CHANCE = 0.03     # probability per frame of a direction nudge
-JITTER_DX_RANGE = 1.0    # max dx perturbation (px/frame)
-JITTER_DY_RANGE = 1.0    # max dy perturbation (px/frame)
+# MID-FLIGHT JITTER (disabled for predictable trajectories)
+JITTER_CHANCE = 0.0      # no jitter — straight-line flight
+JITTER_DX_RANGE = 0.0
+JITTER_DY_RANGE = 0.0
 
 # BOUNCE
-BOUNCE_DY_MIN = -5       # was -4
-BOUNCE_DY_MAX = 5        # was 4
-BOUNCE_TOP_DY_MIN = 2
-BOUNCE_TOP_DY_MAX = 5    # was 4
-BOUNCE_BOTTOM_DY_MIN = -5  # was -4
-BOUNCE_BOTTOM_DY_MAX = -2
-BOUNCE_SPEED_JITTER = 0.15  # ±15% speed variation on bounce
+BOUNCE_DY_MIN = -3       # smaller bounce range — more predictable
+BOUNCE_DY_MAX = 3
+BOUNCE_TOP_DY_MIN = 1
+BOUNCE_TOP_DY_MAX = 3
+BOUNCE_BOTTOM_DY_MIN = -3
+BOUNCE_BOTTOM_DY_MAX = -1
+BOUNCE_SPEED_JITTER = 0.0  # no speed jitter on bounce — predictable
 
 # OPENENV SPECIFIC
 FRAME_OUTPUT_SIZE = (512, 512)  # Resized for VLM

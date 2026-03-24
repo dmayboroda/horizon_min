@@ -84,7 +84,7 @@ training:
   gradient_checkpointing: true
 
 environment:
-  latency_options_ms: [150, 200, 300, 400, 500]  # shifted up — larger model is slower
+  latency_options_ms: [150, 200, 300, 400, 500]
   frames_per_observation: 2
   frames_per_observation_min: 2
   frames_per_observation_max: 4

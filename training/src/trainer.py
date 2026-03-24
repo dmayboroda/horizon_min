@@ -382,8 +382,8 @@ class DuckHuntGRPOTrainer:
         # Advance a few frames so ducks enter the screen from off-screen spawn
         self.env.advance_frames(random.randint(8, 25))
 
-        # Verify we have flying ducks (retry if needed)
-        for _attempt in range(10):
+        # Verify we have flying ducks (retry aggressively)
+        for _attempt in range(30):
             frames = self.env.get_frames()
             state = self.env.get_state()
             flying = state.get("ducks_flying", 0)
@@ -391,9 +391,14 @@ class DuckHuntGRPOTrainer:
                 break
             if self.env.is_done():
                 self.env.reset()
-            self.env.advance_frames(random.randint(5, 15))
+            # Try advancing, or start a completely new match
+            if _attempt < 15:
+                self.env.advance_frames(random.randint(5, 15))
+            else:
+                self.env.auto_advance_to_next_match()
+                self.env.advance_frames(random.randint(8, 25))
         else:
-            logger.warning("Could not find flying ducks after new match, using current state")
+            logger.warning("Could not find flying ducks after 30 attempts, using current state")
 
         # Build prompt (phase 1 = no horizon in tool schema for LiquidAI)
         messages, tools = build_prompt(frames, state, phase=self._current_phase)
