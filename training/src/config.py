@@ -201,6 +201,9 @@ class RewardConfig:
     # Accuracy reward (did model parse / predict correctly)
     accuracy_weight: float = 1.0
 
+    # Hotspot penalty (anti-exploit)
+    hotspot_enabled: bool = True  # set to false to disable hotspot penalty entirely
+
 
 # ---------------------------------------------------------------------------
 # Logging

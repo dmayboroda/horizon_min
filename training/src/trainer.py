@@ -475,7 +475,7 @@ class DuckHuntGRPOTrainer:
             # Hotspot penalty — scaling penalty for repetitive coordinates
             # At 30% concentration: reward *= 0.0 (hit becomes worthless)
             # At 50%+: reward becomes negative (actively punished)
-            if action is not None and reward > 0 and len(self._recent_shots) >= 10:
+            if self.cfg.reward.hotspot_enabled and action is not None and reward > 0 and len(self._recent_shots) >= 10:
                 shot_pos = (action.x, action.y)
                 nearby = sum(
                     1 for sx, sy in self._recent_shots
