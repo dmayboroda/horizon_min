@@ -472,26 +472,28 @@ class DuckHuntGRPOTrainer:
             reward = bd.total
             reward_breakdowns.append(bd)
 
-            # Hotspot penalty — scaling penalty for repetitive coordinates
-            # At 30% concentration: reward *= 0.0 (hit becomes worthless)
-            # At 50%+: reward becomes negative (actively punished)
+            # Hotspot penalty — only penalize repetitive coordinates when NOT aiming at a duck.
+            # If the shot is close to a duck (min_distance < 0.3), it's legitimate aiming.
+            # If the shot is far from any duck AND in a hotspot, it's exploitation.
             if self.cfg.reward.hotspot_enabled and action is not None and reward > 0 and len(self._recent_shots) >= 10:
-                shot_pos = (action.x, action.y)
-                nearby = sum(
-                    1 for sx, sy in self._recent_shots
-                    if abs(sx - shot_pos[0]) < self._hotspot_radius
-                    and abs(sy - shot_pos[1]) < self._hotspot_radius
-                )
-                concentration = nearby / len(self._recent_shots)
-                if concentration > 0.2:
-                    # Scale: 20%→reward*0.5, 40%→reward*-0.5, 60%+→reward*-1.5
-                    scale = 1.0 - (concentration - 0.2) * 5.0  # linear: 0.2→1.0, 0.4→0.0, 0.6→-1.0
-                    reward = reward * max(scale, -1.5)
-                    logger.info(
-                        "  [gen %d] hotspot: %d/%d (%.0f%%) near (%.2f, %.2f), scale=%.2f, reward=%.2f",
-                        i, nearby, len(self._recent_shots), concentration * 100,
-                        shot_pos[0], shot_pos[1], scale, reward,
+                # Only apply hotspot if shot is NOT near a duck
+                is_near_duck = bd.min_distance >= 0 and bd.min_distance < 0.3
+                if not is_near_duck:
+                    shot_pos = (action.x, action.y)
+                    nearby = sum(
+                        1 for sx, sy in self._recent_shots
+                        if abs(sx - shot_pos[0]) < self._hotspot_radius
+                        and abs(sy - shot_pos[1]) < self._hotspot_radius
                     )
+                    concentration = nearby / len(self._recent_shots)
+                    if concentration > 0.2:
+                        scale = 1.0 - (concentration - 0.2) * 5.0
+                        reward = reward * max(scale, -1.5)
+                        logger.info(
+                            "  [gen %d] hotspot: %d/%d (%.0f%%) near (%.2f, %.2f), scale=%.2f, reward=%.2f",
+                            i, nearby, len(self._recent_shots), concentration * 100,
+                            shot_pos[0], shot_pos[1], scale, reward,
+                        )
 
             rewards.append(reward)
 

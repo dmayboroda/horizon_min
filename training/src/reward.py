@@ -24,6 +24,7 @@ class RewardBreakdown:
     base: float = 0.0             # hit/miss/double_kill/shoot_nothing/etc
     horizon_penalty: float = 0.0
     proximity_bonus: float = 0.0
+    edge_bonus: float = 0.0       # bonus for hitting ducks away from screen center
     min_distance: float = -1.0    # -1 = not computed
     outcome: str = ""             # "hit", "miss", "double_kill", "invalid", etc
     duck_a_state: str = ""
@@ -114,5 +115,14 @@ def compute_reward_detailed(
                     -config.proximity_decay * bd.min_distance
                 )
 
-    bd.total = bd.base - bd.horizon_penalty + bd.proximity_bonus
+    # ---- edge bonus (on hits, reward aiming away from screen center) ----
+    if (hit_a or hit_b) and config.edge_bonus > 0:
+        shot_pos = result.get("shot_pos")
+        if shot_pos:
+            # Distance from screen center (0.5, 0.5) in normalized coords
+            # Max distance is ~0.5 (corner), typical duck positions 0.1-0.4
+            center_dist = _distance(shot_pos, (0.5, 0.5))
+            bd.edge_bonus = config.edge_bonus * min(center_dist / 0.4, 1.0)
+
+    bd.total = bd.base - bd.horizon_penalty + bd.proximity_bonus + bd.edge_bonus
     return bd

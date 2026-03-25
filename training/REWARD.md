@@ -24,9 +24,9 @@ Model output
     ├─ Ducks escaped during wait?      → -0.7  (shoot_dead_duck)
     │   (had_target at obs, not at shot)
     │
-    ├─ Hit both ducks?                 → +2.5 - horizon_penalty  (double_kill)
+    ├─ Hit both ducks?                 → +2.5 - horizon_penalty + edge_bonus  (double_kill)
     │
-    ├─ Hit one duck?                   → +1.0 - horizon_penalty  (hit)
+    ├─ Hit one duck?                   → +1.0 - horizon_penalty + edge_bonus  (hit)
     │
     └─ Missed?                         → -0.3 - horizon_penalty_miss + proximity_bonus  (miss)
 ```
@@ -210,13 +210,22 @@ Penalty scales linearly with extra character count:
 
 **Why penalize verbosity**: extra tokens waste compute and slow inference. The model should learn to respond with just the tool call. The floor at 0.3 ensures that a verbose-but-valid response is still better than no tool call (0.0).
 
-## 4. Hotspot Penalty (anti-exploit)
+## 4. Hotspot Penalty (target-aware anti-exploit)
 
-Implemented in `src/trainer.py`. Prevents the model from exploiting a fixed position (e.g. always shooting screen center).
+Implemented in `src/trainer.py`. Prevents the model from exploiting a fixed position (e.g. always shooting screen center) while allowing legitimate aiming at ducks that happen to be near center.
 
-The trainer tracks the last 50 shot positions. For each hit (reward > 0), it calculates the **concentration** — what fraction of recent shots are within 0.10 normalized distance (~80px) of the current shot. If concentration exceeds 20%, the reward is scaled down linearly, eventually going **negative** at high concentration.
+### When it activates
+
+The hotspot penalty **only applies when the shot is far from any duck** (`min_distance >= 0.3`). If the shot is close to a duck (distance < 0.3), the hotspot penalty is skipped entirely — the model is legitimately aiming at a duck, not exploiting a fixed position.
+
+This is critical because ducks often fly through the center of the screen. Without the target-aware check, the penalty punishes the model for correctly aiming at ducks that happen to be near center, causing hits to get negative rewards and GRPO to learn to **avoid** ducks.
+
+### How it works
+
+The trainer tracks the last 50 shot positions. For shots that are **far from any duck** (distance ≥ 0.3) with positive reward, it calculates the **concentration** — what fraction of recent shots are within 0.10 normalized distance (~80px) of the current shot.
 
 ```
+# Only if shot is NOT near a duck (distance >= 0.3):
 concentration = nearby_shots / total_tracked_shots
 
 if concentration > 0.2:
@@ -234,14 +243,51 @@ if concentration > 0.2:
 | 60% | -1.0 | **-1.0** | Same as invalid output |
 | 80%+ | -1.5 (floor) | **-1.5** | Worse than anything |
 
-**Why scaling goes negative**: a flat 0.5x penalty (the old approach) left hotspot hits at +0.5, still much better than any miss. The model rationally preferred spamming the hotspot. With scaling, at 40%+ concentration a hotspot hit is worth 0.0 or less — the only way to get positive reward is to aim somewhere new.
+### Summary by scenario
 
-**Why only on hits**: misses are already negative. The penalty specifically makes repeated-position hits unrewarding.
+| Shot near duck? | In hotspot? | Hotspot applies? | Result |
+|---|---|---|---|
+| Yes (dist < 0.3) | No | No | Full reward — legitimate aim |
+| Yes (dist < 0.3) | Yes | **No** | Full reward — duck is actually there |
+| No (dist ≥ 0.3) | No | No | Normal reward |
+| No (dist ≥ 0.3) | Yes | **Yes** | Penalty — blind position spam |
+
+### Configuration
+
+```yaml
+reward:
+  hotspot_enabled: true  # set to false to disable entirely
+```
 
 **Parameters** (hardcoded in trainer):
 - `hotspot_window`: 50 (track last N shots)
 - `hotspot_radius`: 0.10 (~80px zone)
+- `near_duck_threshold`: 0.3 (shots closer than this skip hotspot)
 - Scale: linear from 1.0 at 20% to -1.5 floor at 50%+
+
+## 4.5 Edge Bonus (anti-center-bias)
+
+Computed in `src/reward.py`. **Only on hits.** Gives a bonus for hitting ducks away from the screen center, incentivizing the model to track ducks across the entire screen rather than parking at center.
+
+```
+center_distance = distance(shot_pos, (0.5, 0.5))
+edge_bonus = edge_bonus_max * min(center_distance / 0.4, 1.0)
+```
+
+| Shot position | Distance from center | Edge bonus (max=0.3) | Total hit reward |
+|---|---|---|---|
+| (0.50, 0.50) center | 0.00 | +0.00 | +1.00 |
+| (0.40, 0.40) near center | 0.14 | +0.11 | +1.11 |
+| (0.30, 0.30) mid-screen | 0.28 | +0.21 | +1.21 |
+| (0.15, 0.25) edge | 0.43 | +0.30 (capped) | +1.30 |
+
+**Why this helps**: without edge bonus, center hits and edge hits are worth the same (+1.0). The model rationally prefers center because ducks pass through center more often. With edge bonus, an edge hit is worth +1.30 — GRPO sees the edge-hitting generation as better and reinforces tracking behavior over center-camping.
+
+**Configuration:**
+```yaml
+reward:
+  edge_bonus: 0.3  # 0 = disabled; max bonus for edge hits
+```
 
 ## 5. Combined Reward
 
@@ -495,6 +541,8 @@ reward:
   lambda_horizon_miss: 0.2   # horizon penalty coefficient (on misses)
   proximity_bonus: 0.3       # max proximity bonus (on misses only)
   proximity_decay: 5.0       # how fast proximity bonus decays with distance
+  edge_bonus: 0.3            # 0 = disabled; max bonus for hitting ducks away from center
+  hotspot_enabled: true      # false to disable hotspot penalty entirely
   format_weight: 0.3         # weight for format reward in total
   accuracy_weight: 1.0       # weight for accuracy reward in total
   max_horizon: 30            # max horizon for penalty normalization
@@ -522,7 +570,9 @@ training:
 | All generations get same reward | Model collapsed, or proximity bonus too small | Increase `proximity_bonus`, check entropy config |
 | Hit rate plateau | Proximity decay too slow (bonus too easy) | Increase `proximity_decay` to 8.0 |
 | Model writes explanations | Format verbosity penalty too weak | Reduce format floor from 0.3 to 0.1 |
-| Model always shoots center | Hotspot penalty threshold too high | Reduce concentration threshold or increase scale steepness |
+| Model always shoots center (with hotspot ON) | Hotspot penalty killing legitimate hits near center | Verify hotspot is target-aware (dist < 0.3 skips penalty); increase `edge_bonus` |
+| Model always shoots center (with hotspot OFF) | No penalty for center-camping | Enable hotspot (`hotspot_enabled: true`) and/or increase `edge_bonus` |
+| Hits get negative rewards from hotspot | Hotspot not target-aware, punishing duck-tracking | Upgrade hotspot to check `min_distance < 0.3` before penalizing (see section 4) |
 | Model ignores dead ducks | Working correctly — proximity only targets flying ducks | No fix needed |
 | Model shoots dead ducks | `shoot_dead_duck` penalty too weak | Increase to -0.9 |
 | Same duck positions every step | Environment not advancing to new match | Verify `auto_advance_to_next_match()` is called each step |

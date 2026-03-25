@@ -195,6 +195,9 @@ class RewardConfig:
     # Max horizon (for penalty normalisation)
     max_horizon: int = 30
 
+    # Edge bonus (on hits, reward aiming away from screen center)
+    edge_bonus: float = 0.0  # 0 = disabled; e.g. 0.3 = up to +0.3 bonus for edge hits
+
     # Format reward (structured output)
     format_weight: float = 0.3
 
