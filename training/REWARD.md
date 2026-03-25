@@ -24,9 +24,9 @@ Model output
     ├─ Ducks escaped during wait?      → -0.7  (shoot_dead_duck)
     │   (had_target at obs, not at shot)
     │
-    ├─ Hit both ducks?                 → +2.5 - horizon_penalty + edge_bonus  (double_kill)
+    ├─ Hit both ducks?                 → +2.5 - horizon_penalty + edge_bonus + center_bonus  (double_kill)
     │
-    ├─ Hit one duck?                   → +1.0 - horizon_penalty + edge_bonus  (hit)
+    ├─ Hit one duck?                   → +1.0 - horizon_penalty + edge_bonus + center_bonus  (hit)
     │
     └─ Missed?                         → -0.3 - horizon_penalty_miss + proximity_bonus  (miss)
 ```
@@ -289,6 +289,73 @@ reward:
   edge_bonus: 0.3  # 0 = disabled; max bonus for edge hits
 ```
 
+## 4.6 Hitbox Center Bonus (precision reward)
+
+Computed in `src/reward.py`. **Only on hits.** Rewards the model for hitting closer to the center of the duck's hitbox, encouraging precision over just "anywhere inside the hitbox."
+
+```
+duck_center = (duck_pos + hitbox_size / 2) in normalized coords
+dist_to_center = distance(shot_pos, duck_center)
+max_dist = half-diagonal of hitbox in normalized coords (~0.086)
+hitbox_center_bonus = bonus_max * max(0, 1.0 - dist_to_center / max_dist)
+```
+
+| Shot placement | Distance to duck center | Bonus (max=0.5) | Total hit reward |
+|---|---|---|---|
+| Dead center of duck | 0.00 | +0.50 | +1.50 |
+| Quarter from center | ~0.02 | +0.38 | +1.38 |
+| Half from center | ~0.04 | +0.25 | +1.25 |
+| Edge of hitbox | ~0.086 | +0.00 | +1.00 |
+
+**Why this helps**: without this bonus, all hits get +1.0 regardless of precision. Two generations that both hit the same duck get identical rewards — GRPO sees no difference. With the center bonus, a precise hit gets +1.5 while an edge hit gets +1.0. GRPO reinforces the more precise generation.
+
+**Configuration:**
+```yaml
+reward:
+  hitbox_center_bonus: 0.5  # 0 = disabled; max bonus for center-of-duck hits
+```
+
+## 4.7 Generation Filtering (noise reduction)
+
+The trainer can optionally **skip noisy generations** from the GRPO advantage computation instead of including them with negative rewards. This prevents irrelevant signals from drowning out the aiming gradient.
+
+### Skip invalid generations
+
+When `skip_invalid_generations: true`, generations with unparseable output (safety refusals, text explanations, wrong format) are dropped from the GRPO batch entirely. Only generations with valid `shoot(x, y)` calls contribute to advantages.
+
+**Why**: once the model already produces valid tool calls 95%+ of the time, the occasional refusal creates a huge reward outlier (-1.0 vs ~-0.1) that dominates the advantage computation. The gradient says "don't refuse" instead of "aim better."
+
+### Skip no-target generations
+
+When `skip_no_target: true`, generations where ducks escaped during processing time (`shoot_nothing`, `shoot_dead_duck`) are dropped. The model saw ducks when it started processing but they were gone by the time the shot landed — this is not the model's fault.
+
+**Why**: penalizing the model for impossible shots adds noise. The model can't learn to avoid something it couldn't predict (ducks escaping during latency). Skipping these keeps GRPO focused on hit/miss comparisons.
+
+### How filtering works
+
+```
+6 generations → filter → 4 remaining → compute advantages on 4
+
+Example:
+  gen 0: miss (valid, ducks present)     → KEEP
+  gen 1: hit  (valid, ducks present)     → KEEP
+  gen 2: "I'm sorry..." (invalid)        → SKIP (skip_invalid_generations)
+  gen 3: miss (valid, ducks present)     → KEEP
+  gen 4: shoot_nothing (ducks escaped)   → SKIP (skip_no_target)
+  gen 5: miss (valid, ducks present)     → KEEP
+
+  GRPO computes advantages over [gen 0, 1, 3, 5] only
+```
+
+If ALL generations would be filtered, no filtering is applied (keeps the full batch to avoid empty batches).
+
+**Configuration:**
+```yaml
+reward:
+  skip_invalid_generations: true   # drop unparseable outputs from GRPO
+  skip_no_target: true             # drop impossible shots from GRPO
+```
+
 ## 5. Combined Reward
 
 The total reward per generation is:
@@ -488,7 +555,7 @@ training:
 
 ## 11. Training Usage
 
-### Single run (recommended)
+### LFM2.5-VL-1.6B — single run
 
 ```bash
 python train.py --config configs/liquidai_config.yaml --custom \
@@ -498,24 +565,70 @@ python train.py --config configs/liquidai_config.yaml --custom \
 
 Phase 1 (steps 0–14999): `shoot(x, y)` only, no horizon. Phase 2 (steps 15000–24999): `shoot(x, y, horizon)`.
 
-### Two separate runs
+### LFM2-VL-3B — full training
 
-Phase 1 — train aiming only:
 ```bash
-python train.py --config configs/liquidai_config.yaml --custom \
-    --override training.max_steps=15000 \
-    --override grpo.curriculum_phase2_step=99999
+python train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000 \
+    --override training.warmup_ratio=0.03 \
+    --override training.learning_rate=2e-5 \
+    --override grpo.num_generations=6 \
+    --override reward.hotspot_enabled=true \
+    --override reward.edge_bonus=0.3 \
+    --override reward.hitbox_center_bonus=0.5 \
+    --override reward.skip_invalid_generations=true \
+    --override reward.skip_no_target=true \
+    --override reward.format_weight=0.0 \
+    --override logging.wandb_run_name="lfm2-3b-grpo" \
+    --push-to-hub --hub-model-id dmayboroda/duckhunt_liquidai_3b_grpo
 ```
 
-Check W&B, verify hit rate is good (30%+). Then Phase 2 — resume with horizon:
+### LFM2-VL-3B — resume from checkpoint (precision training)
+
+Resume from a checkpoint with good hit rate (e.g. 30%) and switch to precision-focused rewards:
+
 ```bash
-python train.py --config configs/liquidai_config.yaml --custom \
+python train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000 \
+    --override training.warmup_ratio=0.03 \
+    --override training.learning_rate=2e-5 \
+    --override grpo.num_generations=6 \
+    --override reward.hotspot_enabled=true \
+    --override reward.edge_bonus=0.3 \
+    --override reward.hitbox_center_bonus=0.5 \
+    --override reward.skip_invalid_generations=true \
+    --override reward.skip_no_target=true \
+    --override reward.format_weight=0.0 \
+    --override logging.wandb_run_name="lfm2-3b-precision-resume" \
+    --push-to-hub --hub-model-id dmayboroda/duckhunt_liquidai_3b_grpo \
+    --resume outputs/lfm2_3b_duckhunt_grpo/checkpoint-XXXX
+```
+
+Replace `checkpoint-XXXX` with the checkpoint path.
+
+### Two-phase approach (train aiming, then resume with precision)
+
+Phase 1 — basic aiming with format reward:
+```bash
+python train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=15000 \
+    --override grpo.curriculum_phase2_step=99999 \
+    --override reward.format_weight=0.3
+```
+
+Phase 2 — resume with precision rewards, no format reward:
+```bash
+python train.py --config configs/liquidai_3b_config.yaml --custom \
     --override training.max_steps=10000 \
     --override grpo.curriculum_phase2_step=0 \
-    --resume outputs/lfm25_duckhunt_grpo_v4/checkpoint-14999
+    --override reward.format_weight=0.0 \
+    --override reward.hitbox_center_bonus=0.5 \
+    --override reward.skip_invalid_generations=true \
+    --override reward.skip_no_target=true \
+    --resume outputs/lfm2_3b_duckhunt_grpo/checkpoint-XXXX
 ```
-
-Setting `curriculum_phase2_step=0` disables curriculum, so horizon is active from step 0 of the resumed run.
 
 ### CLI overrides
 
@@ -525,6 +638,9 @@ Any config value can be overridden with `--override section.key=value`:
 --override training.learning_rate=3e-5
 --override grpo.num_generations=8
 --override reward.lambda_horizon=0.3
+--override reward.hitbox_center_bonus=0.5
+--override reward.skip_invalid_generations=true
+--override reward.skip_no_target=true
 ```
 
 ## 12. Config Reference
@@ -542,8 +658,11 @@ reward:
   proximity_bonus: 0.3       # max proximity bonus (on misses only)
   proximity_decay: 5.0       # how fast proximity bonus decays with distance
   edge_bonus: 0.3            # 0 = disabled; max bonus for hitting ducks away from center
+  hitbox_center_bonus: 0.5   # 0 = disabled; max bonus for hitting center of duck
   hotspot_enabled: true      # false to disable hotspot penalty entirely
-  format_weight: 0.3         # weight for format reward in total
+  skip_invalid_generations: true   # drop unparseable outputs from GRPO
+  skip_no_target: true             # drop impossible shots (ducks escaped) from GRPO
+  format_weight: 0.0         # 0 when model already learned tool calls
   accuracy_weight: 1.0       # weight for accuracy reward in total
   max_horizon: 30            # max horizon for penalty normalization
 
@@ -580,3 +699,8 @@ training:
 | Hit rate drops at phase 2 start | Normal — model adjusting to harder task | Let it run 500+ steps, should recover |
 | Different hit rates across runs (<1k steps) | Seed sensitivity — early duck positions bias LoRA direction | Increase `stabilization_steps` and `stabilization_grad_accum`, or increase `lora_freeze_steps` |
 | Early training unstable / spiky loss | Gradients too noisy from random game states | Increase `warmup_ratio` to 0.15, increase `stabilization_grad_accum` to 16 |
+| Hit rate flat at ~20% (3B model) | Hotspot penalty killing legit hits; no precision reward | Disable hotspot or use target-aware version; add `hitbox_center_bonus=0.5` |
+| Model hits but doesn't improve precision | All hits get same reward regardless of accuracy | Add `hitbox_center_bonus=0.5` — center hits get more reward than edge hits |
+| Safety refusals dominating GRPO signal | -1.0 invalid reward creates huge outlier advantage | Enable `skip_invalid_generations=true` |
+| Model penalized for ducks escaping during latency | -0.5/-0.7 for impossible shots adds noise | Enable `skip_no_target=true` |
+| Model already knows format but format_weight > 0 | Format reward is constant for all gens, adds no GRPO signal | Set `format_weight=0.0` for precision-focused training |

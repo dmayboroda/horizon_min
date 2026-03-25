@@ -331,10 +331,11 @@ class DuckHuntGRPOTrainer:
                     self.optimizer.zero_grad()
                     self.global_step += 1
 
-            # Track hit rate
+            # Track hit rate (actual hits, not positive rewards)
             rewards = batch["rewards"]
+            actual_hits = batch["hit_flags"]
             self._total_shots += len(rewards)
-            self._total_hits += sum(1 for r in rewards if r > 0)
+            self._total_hits += sum(1 for h in actual_hits if h)
             metrics["gradient_norm"] = self._last_grad_norm
             metrics["hit_rate"] = self._total_hits / max(self._total_shots, 1)
             metrics["total_hits"] = self._total_hits
@@ -545,14 +546,17 @@ class DuckHuntGRPOTrainer:
             filtered_ids = []
             filtered_rewards = []
             filtered_full = []
+            filtered_hits = []
             for idx in range(G):
                 if not skip_mask[idx]:
                     filtered_ids.append(completion_ids_list[idx])
                     filtered_rewards.append(rewards[idx])
                     filtered_full.append(output_ids[idx])
+                    filtered_hits.append(hit_flags[idx])
             skipped = sum(skip_mask)
             completion_ids_list = filtered_ids
             rewards = filtered_rewards
+            hit_flags = filtered_hits
             output_ids = torch.stack(filtered_full)
             logger.info(
                 "  Skipped %d generation(s), %d remaining",
@@ -563,6 +567,7 @@ class DuckHuntGRPOTrainer:
             "prompt_ids": inputs["input_ids"][0],  # (T_prompt,)
             "completion_ids": completion_ids_list,  # list of G tensors
             "rewards": rewards,  # list of G floats
+            "hit_flags": hit_flags,  # list of G bools (actual hits)
             "full_ids": output_ids,  # (G, T_prompt + T_comp)
             "prompt_len": prompt_len,
             "attention_mask": inputs.get("attention_mask"),
@@ -761,6 +766,16 @@ class DuckHuntGRPOTrainer:
             # Render using the environment's renderer
             renderer = self.env._env.renderer
             frame = renderer.render_and_resize(game_state, total_advance)
+
+            # Draw hitbox rectangles on top of ducks
+            frame = self._draw_hitbox(
+                frame, duck_a.x, duck_a.y, duck_a.state.value,
+                color=(255, 255, 0), label="A",
+            )
+            frame = self._draw_hitbox(
+                frame, duck_b.x, duck_b.y, duck_b.state.value,
+                color=(0, 255, 255), label="B",
+            )
             return frame
 
         except Exception as e:
@@ -782,6 +797,50 @@ class DuckHuntGRPOTrainer:
             sprite_path = assets / "crosshairs.png"
             cls._crosshair_sprite = Image.open(sprite_path).convert("RGBA")
         return cls._crosshair_sprite
+
+    @staticmethod
+    def _draw_hitbox(
+        frame: Image.Image,
+        duck_x: float,
+        duck_y: float,
+        duck_state: str,
+        color: tuple = (255, 255, 0),
+        label: str | None = None,
+    ) -> Image.Image:
+        """Draw a hitbox rectangle on a copy of the frame for a duck."""
+        from PIL import ImageDraw
+        try:
+            from config import HITBOX_WIDTH, HITBOX_HEIGHT, SPRITE_WIDTH, SPRITE_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT
+        except ImportError:
+            return frame
+
+        if duck_state != "flying":
+            return frame
+
+        img = frame.copy().convert("RGBA")
+        w, h = img.size
+
+        # Duck position is top-left of sprite in game coords
+        # Hitbox is centered on sprite
+        hx = duck_x + (SPRITE_WIDTH - HITBOX_WIDTH) / 2
+        hy = duck_y + (SPRITE_HEIGHT - HITBOX_HEIGHT) / 2
+
+        # Convert to frame pixel coords (frame might be 512x512, game is 800x500)
+        scale_x = w / SCREEN_WIDTH
+        scale_y = h / SCREEN_HEIGHT
+        x1 = int(hx * scale_x)
+        y1 = int(hy * scale_y)
+        x2 = int((hx + HITBOX_WIDTH) * scale_x)
+        y2 = int((hy + HITBOX_HEIGHT) * scale_y)
+
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        draw.rectangle([x1, y1, x2, y2], outline=color + (200,), width=2)
+        if label:
+            draw.text((x1, y1 - 12), label, fill=color + (255,))
+
+        img = Image.alpha_composite(img, overlay)
+        return img.convert("RGB")
 
     @staticmethod
     def _draw_crosshair(
