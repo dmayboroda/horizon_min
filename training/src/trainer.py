@@ -385,8 +385,6 @@ class DuckHuntGRPOTrainer:
 
             # 5. Save checkpoint (main process only)
             if (step + 1) % train.save_steps == 0 and self._is_main_process:
-                if self._distributed:
-                    self.accelerator.wait_for_everyone()
                 self._save_checkpoint(step, metrics)
 
             # 6. Evaluation
@@ -405,8 +403,6 @@ class DuckHuntGRPOTrainer:
                         self._save_best_checkpoint(step, eval_metrics)
 
         # Final save — Phase 2 (or Phase 1 if curriculum disabled)
-        if self._distributed:
-            self.accelerator.wait_for_everyone()
         if self._is_main_process:
             self._save_checkpoint(total_steps - 1, {})
             self._save_phase_checkpoint(phase=self._current_phase, step=total_steps - 1)
