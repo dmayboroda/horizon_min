@@ -27,12 +27,17 @@ _DTYPE_MAP: dict[str, torch.dtype] = {
 # ---------------------------------------------------------------------------
 def load_model_and_processor(
     config: ModelConfig,
+    distributed: bool = False,
 ) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
-    """Load the Ministral-3-8B model and its processor.
+    """Load the model and its processor.
 
-    Uses ``AutoModelForImageTextToText`` which resolves to
-    ``Mistral3ForConditionalGeneration`` for the mistral3 architecture
-    (8.4 B LLM + 0.4 B Pixtral vision encoder).
+    Uses ``AutoModelForImageTextToText`` which resolves to the
+    correct architecture based on the model config.
+
+    Parameters
+    ----------
+    distributed : bool
+        If True, skip device_map (Accelerate handles placement for DDP).
     """
     model_name = config.model_name
     dtype = _DTYPE_MAP.get(config.torch_dtype, torch.bfloat16)
@@ -66,11 +71,15 @@ def load_model_and_processor(
         quantization_config = BitsAndBytesConfig(load_in_8bit=True)
         logger.info("Loading model in 8-bit")
 
-    logger.info("Loading model from %s (dtype=%s) …", model_name, config.torch_dtype)
+    # In distributed mode, skip device_map — Accelerate handles GPU placement.
+    # device_map="auto" uses model parallelism which conflicts with DDP.
+    device_map = None if distributed else config.device_map
+
+    logger.info("Loading model from %s (dtype=%s, distributed=%s) …", model_name, config.torch_dtype, distributed)
     model = AutoModelForImageTextToText.from_pretrained(
         model_name,
         torch_dtype=dtype,
-        device_map=config.device_map,
+        device_map=device_map,
         attn_implementation=config.attn_implementation,
         trust_remote_code=config.trust_remote_code,
         quantization_config=quantization_config,

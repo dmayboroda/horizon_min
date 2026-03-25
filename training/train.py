@@ -278,14 +278,38 @@ processor = AutoProcessor.from_pretrained("{repo_id}")
 # ===================================================================
 def train_custom(cfg: FullConfig, resume_from: str | None = None) -> None:
     """Train using the custom ``DuckHuntGRPOTrainer``."""
+    import os
     from src.environment import DuckHuntEnvWrapper
     from src.trainer import DuckHuntGRPOTrainer
 
-    # 1. Environment
+    # Detect distributed mode
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    distributed = world_size > 1
+
+    accelerator = None
+    if distributed:
+        from accelerate import Accelerator
+        from accelerate import DistributedDataParallelKwargs
+
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        accelerator = Accelerator(
+            mixed_precision="bf16" if cfg.training.bf16 else ("fp16" if cfg.training.fp16 else "no"),
+            kwargs_handlers=[ddp_kwargs],
+        )
+        logger.info(
+            "Distributed training: %d GPUs, rank %d, device %s",
+            accelerator.num_processes, accelerator.process_index, accelerator.device,
+        )
+        # Different random seed per rank for environment diversity
+        import random
+        rank_seed = cfg.training.seed + accelerator.process_index
+        random.seed(rank_seed)
+
+    # 1. Environment (each rank gets its own instance)
     env = DuckHuntEnvWrapper(cfg.environment)
 
     # 2. Model + LoRA
-    model, processor = load_model_and_processor(cfg.model)
+    model, processor = load_model_and_processor(cfg.model, distributed=distributed)
     if cfg.lora.enabled:
         model = apply_lora(model, cfg.lora)
 
@@ -295,6 +319,7 @@ def train_custom(cfg: FullConfig, resume_from: str | None = None) -> None:
         processor=processor,
         env=env,
         config=cfg,
+        accelerator=accelerator,
     )
 
     # 4. Train (with optional resume)

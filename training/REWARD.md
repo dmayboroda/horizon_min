@@ -630,6 +630,54 @@ python train.py --config configs/liquidai_3b_config.yaml --custom \
     --resume outputs/lfm2_3b_duckhunt_grpo/checkpoint-XXXX
 ```
 
+### Multi-GPU training (2x A100)
+
+Uses HuggingFace Accelerate with DDP. Each GPU processes its own game state independently — 2x more diverse training data per optimizer step. Gradients are averaged across GPUs automatically.
+
+```bash
+accelerate launch --config_file configs/accelerate_2gpu.yaml \
+    train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000 \
+    --override logging.wandb_run_name="lfm2-3b-2gpu" \
+    --push-to-hub --hub-model-id dmayboroda/duckhunt_liquidai_3b_grpo
+```
+
+Or inline without a config file:
+```bash
+accelerate launch --num_processes=2 --mixed_precision=bf16 \
+    train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000
+```
+
+**How it works:**
+- Each GPU gets its own environment instance with a different random seed
+- Each GPU generates G completions from a different game state
+- Gradients are averaged across GPUs via DDP
+- W&B logging and checkpointing only happen on rank 0
+- `device_map="auto"` is automatically disabled (conflicts with DDP)
+
+**Effective batch size with 2 GPUs:**
+- 1 GPU: `batch_size × grad_accum = 1 × 8 = 8` game states per optimizer step
+- 2 GPU: `batch_size × grad_accum × 2 = 1 × 8 × 2 = 16` game states per optimizer step
+
+**Accelerate config file** (`configs/accelerate_2gpu.yaml`):
+```yaml
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+```
+
+**Single GPU still works** — no code changes needed:
+```bash
+python train.py --config configs/liquidai_3b_config.yaml --custom ...
+```
+
+The trainer auto-detects `WORLD_SIZE > 1` and only uses Accelerate when distributed.
+
 ### CLI overrides
 
 Any config value can be overridden with `--override section.key=value`:
@@ -704,3 +752,6 @@ training:
 | Safety refusals dominating GRPO signal | -1.0 invalid reward creates huge outlier advantage | Enable `skip_invalid_generations=true` |
 | Model penalized for ducks escaping during latency | -0.5/-0.7 for impossible shots adds noise | Enable `skip_no_target=true` |
 | Model already knows format but format_weight > 0 | Format reward is constant for all gens, adds no GRPO signal | Set `format_weight=0.0` for precision-focused training |
+| Multi-GPU: `device_map="auto"` error with DDP | device_map uses model parallelism, DDP needs full model per GPU | Auto-handled: trainer disables device_map when `WORLD_SIZE > 1` |
+| Multi-GPU: `model.generate()` fails | DDP wrapper doesn't support generate | Auto-handled: trainer uses `_unwrap_model().generate()` |
+| Multi-GPU: duplicate W&B logs | All ranks trying to log | Auto-handled: only rank 0 logs to W&B and saves checkpoints |

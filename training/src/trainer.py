@@ -70,16 +70,19 @@ class DuckHuntGRPOTrainer:
         processor,
         env: DuckHuntEnvWrapper,
         config: FullConfig,
+        accelerator=None,
     ) -> None:
-        self.model = model
         self.processor = processor
         self.env = env
         self.cfg = config
+        self.accelerator = accelerator
+        self._distributed = accelerator is not None
 
         grpo = config.grpo
         train = config.training
 
         # Reference model (frozen copy)  — skipped when beta == 0
+        # Must be created BEFORE accelerator.prepare() wraps the model
         self.ref_model = None
         if grpo.beta > 0:
             self.ref_model = copy.deepcopy(model)
@@ -88,21 +91,18 @@ class DuckHuntGRPOTrainer:
                 p.requires_grad_(False)
 
         # Optimiser
-        self.optimizer = AdamW(
+        optimizer = AdamW(
             [p for p in model.parameters() if p.requires_grad],
             lr=train.learning_rate,
             weight_decay=train.weight_decay,
         )
 
         total_steps = train.max_steps if train.max_steps > 0 else 1000
-        # Scheduler operates on optimizer steps (every grad_accum loop steps),
-        # not raw loop steps. Use normal grad_accum for the estimate since
-        # stabilization only affects a small prefix.
         total_optimizer_steps = total_steps // train.gradient_accumulation_steps
         warmup_optimizer_steps = int(total_optimizer_steps * train.warmup_ratio)
-        self.scheduler = get_scheduler(
+        scheduler = get_scheduler(
             train.lr_scheduler_type,
-            optimizer=self.optimizer,
+            optimizer=optimizer,
             num_warmup_steps=warmup_optimizer_steps,
             num_training_steps=total_optimizer_steps,
         )
@@ -111,11 +111,25 @@ class DuckHuntGRPOTrainer:
             total_optimizer_steps, warmup_optimizer_steps, total_steps, train.gradient_accumulation_steps,
         )
 
-        self.device = next(model.parameters()).device
+        # Wrap with Accelerate for distributed training
+        if self._distributed:
+            self.model, self.optimizer, self.scheduler = accelerator.prepare(
+                model, optimizer, scheduler,
+            )
+            self.device = accelerator.device
+            # Move ref model to correct device
+            if self.ref_model is not None:
+                self.ref_model = self.ref_model.to(self.device)
+        else:
+            self.model = model
+            self.optimizer = optimizer
+            self.scheduler = scheduler
+            self.device = next(model.parameters()).device
 
         # Enable gradient checkpointing to save memory
         if train.gradient_checkpointing:
-            model.gradient_checkpointing_enable()
+            unwrapped = self._unwrap_model()
+            unwrapped.gradient_checkpointing_enable()
             logger.info("Gradient checkpointing enabled")
 
         # Checkpoint tracking
@@ -166,9 +180,9 @@ class DuckHuntGRPOTrainer:
                 self._normal_grad_accum,
             )
 
-        # wandb
+        # wandb — only on main process
         self._wandb_active = False
-        if _WANDB and config.logging.report_to == "wandb":
+        if _WANDB and config.logging.report_to == "wandb" and self._is_main_process:
             wandb.init(
                 project=config.logging.wandb_project,
                 entity=config.logging.wandb_entity,
@@ -176,6 +190,21 @@ class DuckHuntGRPOTrainer:
                 config=self._build_wandb_config(),
             )
             self._wandb_active = True
+
+    # ------------------------------------------------------------------
+    #  Distributed helpers
+    # ------------------------------------------------------------------
+    @property
+    def _is_main_process(self) -> bool:
+        if self.accelerator is not None:
+            return self.accelerator.is_main_process
+        return True
+
+    def _unwrap_model(self):
+        """Return the underlying model (unwrapped from DDP/Accelerate)."""
+        if self.accelerator is not None:
+            return self.accelerator.unwrap_model(self.model)
+        return self.model
 
     # ------------------------------------------------------------------
     #  Build full config dict for W&B (logged once)
@@ -237,14 +266,14 @@ class DuckHuntGRPOTrainer:
     # ------------------------------------------------------------------
     def _freeze_lora(self) -> None:
         """Freeze all LoRA parameters (base model already frozen by PEFT)."""
-        for name, param in self.model.named_parameters():
+        for name, param in self._unwrap_model().named_parameters():
             if "lora" in name.lower():
                 param.requires_grad_(False)
         self._lora_frozen = True
 
     def _unfreeze_lora(self) -> None:
         """Unfreeze LoRA parameters."""
-        for name, param in self.model.named_parameters():
+        for name, param in self._unwrap_model().named_parameters():
             if "lora" in name.lower():
                 param.requires_grad_(True)
         self._lora_frozen = False
@@ -296,8 +325,9 @@ class DuckHuntGRPOTrainer:
             if self._curriculum_enabled:
                 if step >= self._phase2_step and self._current_phase == 1:
                     # Save Phase 1 checkpoint before transitioning
-                    logger.info("Saving Phase 1 checkpoint at step %d ...", step)
-                    self._save_phase_checkpoint(phase=1, step=step)
+                    if self._is_main_process:
+                        logger.info("Saving Phase 1 checkpoint at step %d ...", step)
+                        self._save_phase_checkpoint(phase=1, step=step)
                     self._current_phase = 2
                     logger.info(
                         "=== CURRICULUM: switching to phase 2 (horizon unlocked) at step %d ===",
@@ -313,7 +343,10 @@ class DuckHuntGRPOTrainer:
             # 3. Backprop (with grad accumulation)
             grad_accum = self._get_grad_accum(step)
             scaled_loss = loss / grad_accum
-            scaled_loss.backward()
+            if self._distributed:
+                self.accelerator.backward(scaled_loss)
+            else:
+                scaled_loss.backward()
 
             if (step + 1) % grad_accum == 0:
                 if self._lora_frozen:
@@ -321,10 +354,15 @@ class DuckHuntGRPOTrainer:
                     self.optimizer.zero_grad()
                 else:
                     # Compute gradient norm before clipping
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), train.max_grad_norm
-                    )
-                    self._last_grad_norm = grad_norm.item()
+                    if self._distributed:
+                        grad_norm = self.accelerator.clip_grad_norm_(
+                            self.model.parameters(), train.max_grad_norm
+                        )
+                    else:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), train.max_grad_norm
+                        )
+                    self._last_grad_norm = grad_norm.item() if hasattr(grad_norm, 'item') else float(grad_norm)
 
                     self.optimizer.step()
                     self.scheduler.step()
@@ -341,12 +379,14 @@ class DuckHuntGRPOTrainer:
             metrics["total_hits"] = self._total_hits
             metrics["total_shots"] = self._total_shots
 
-            # 4. Logging
-            if (step + 1) % train.logging_steps == 0:
+            # 4. Logging (main process only in distributed)
+            if (step + 1) % train.logging_steps == 0 and self._is_main_process:
                 self._log_metrics(step, metrics)
 
-            # 5. Save checkpoint
-            if (step + 1) % train.save_steps == 0:
+            # 5. Save checkpoint (main process only)
+            if (step + 1) % train.save_steps == 0 and self._is_main_process:
+                if self._distributed:
+                    self.accelerator.wait_for_everyone()
                 self._save_checkpoint(step, metrics)
 
             # 6. Evaluation
@@ -365,8 +405,11 @@ class DuckHuntGRPOTrainer:
                         self._save_best_checkpoint(step, eval_metrics)
 
         # Final save — Phase 2 (or Phase 1 if curriculum disabled)
-        self._save_checkpoint(total_steps - 1, {})
-        self._save_phase_checkpoint(phase=self._current_phase, step=total_steps - 1)
+        if self._distributed:
+            self.accelerator.wait_for_everyone()
+        if self._is_main_process:
+            self._save_checkpoint(total_steps - 1, {})
+            self._save_phase_checkpoint(phase=self._current_phase, step=total_steps - 1)
         logger.info("Training complete after %d steps.", total_steps)
 
     # ------------------------------------------------------------------
@@ -425,10 +468,11 @@ class DuckHuntGRPOTrainer:
         else:
             max_tokens = grpo.max_completion_length
 
-        # Generate G completions
-        self.model.eval()
+        # Generate G completions (use unwrapped model — DDP wrapper breaks generate)
+        gen_model = self._unwrap_model()
+        gen_model.eval()
         with torch.no_grad():
-            output_ids = self.model.generate(
+            output_ids = gen_model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
                 do_sample=True,
@@ -1129,7 +1173,7 @@ class DuckHuntGRPOTrainer:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. LoRA weights (adapter_model.safetensors + adapter_config.json)
-        self.model.save_pretrained(str(out_dir))
+        self._unwrap_model().save_pretrained(str(out_dir))
         self.processor.save_pretrained(str(out_dir))
 
         # 2. Optimizer state
@@ -1178,7 +1222,7 @@ class DuckHuntGRPOTrainer:
         best_dir.mkdir(parents=True, exist_ok=True)
 
         # Model + processor
-        self.model.save_pretrained(str(best_dir))
+        self._unwrap_model().save_pretrained(str(best_dir))
         self.processor.save_pretrained(str(best_dir))
 
         # Optimizer + scheduler
@@ -1216,7 +1260,7 @@ class DuckHuntGRPOTrainer:
         phase_dir = Path(self.cfg.training.output_dir) / f"phase{phase}_checkpoint"
         phase_dir.mkdir(parents=True, exist_ok=True)
 
-        self.model.save_pretrained(str(phase_dir))
+        self._unwrap_model().save_pretrained(str(phase_dir))
         self.processor.save_pretrained(str(phase_dir))
 
         trainer_state = {
@@ -1247,8 +1291,9 @@ class DuckHuntGRPOTrainer:
         # 1. Load model weights (LoRA adapter)
         from peft import PeftModel
 
-        if hasattr(self.model, "load_adapter"):
-            self.model.load_adapter(str(ckpt), adapter_name="default")
+        unwrapped = self._unwrap_model()
+        if hasattr(unwrapped, "load_adapter"):
+            unwrapped.load_adapter(str(ckpt), adapter_name="default")
         else:
             logger.warning("Model does not support load_adapter; skipping weight load.")
 
