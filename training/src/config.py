@@ -198,6 +198,15 @@ class RewardConfig:
     # Edge bonus (on hits, reward aiming away from screen center)
     edge_bonus: float = 0.0  # 0 = disabled; e.g. 0.3 = up to +0.3 bonus for edge hits
 
+    # Hitbox center bonus (on hits, reward aiming at center of duck hitbox)
+    hitbox_center_bonus: float = 0.0  # 0 = disabled; e.g. 0.5 = max bonus for perfect center hit
+
+    # Skip invalid generations in GRPO (exclude unparseable outputs from advantage computation)
+    skip_invalid_generations: bool = False  # true = drop invalid gens instead of giving -1.0
+
+    # Skip no-target generations (shoot_nothing, shoot_dead_duck) — model couldn't have known
+    skip_no_target: bool = False  # true = exclude these from GRPO advantage computation
+
     # Format reward (structured output)
     format_weight: float = 0.3
 

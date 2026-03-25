@@ -530,6 +530,35 @@ class DuckHuntGRPOTrainer:
         # Advance the real environment (larger range for diverse states)
         self.env.advance_frames(random.randint(15, 60))
 
+        # Optionally filter out noisy generations from GRPO
+        skip_mask = [False] * G
+        if self.cfg.reward.skip_invalid_generations:
+            for idx in range(G):
+                if parsed_actions[idx] is None:
+                    skip_mask[idx] = True
+        if self.cfg.reward.skip_no_target:
+            for idx in range(G):
+                if reward_breakdowns[idx].outcome in ("shoot_nothing", "shoot_dead"):
+                    skip_mask[idx] = True
+
+        if any(skip_mask) and not all(skip_mask):
+            filtered_ids = []
+            filtered_rewards = []
+            filtered_full = []
+            for idx in range(G):
+                if not skip_mask[idx]:
+                    filtered_ids.append(completion_ids_list[idx])
+                    filtered_rewards.append(rewards[idx])
+                    filtered_full.append(output_ids[idx])
+            skipped = sum(skip_mask)
+            completion_ids_list = filtered_ids
+            rewards = filtered_rewards
+            output_ids = torch.stack(filtered_full)
+            logger.info(
+                "  Skipped %d generation(s), %d remaining",
+                skipped, len(rewards),
+            )
+
         return {
             "prompt_ids": inputs["input_ids"][0],  # (T_prompt,)
             "completion_ids": completion_ids_list,  # list of G tensors
