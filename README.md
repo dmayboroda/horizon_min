@@ -29,7 +29,15 @@ The horizon tradeoff makes it harder still. The model can wait longer for a clea
 
 ## How It Works
 
+Two-stage training pipeline:
+
 ```
+Stage 1 — SFT (Detection):
+Game Frames (512x512) -> Vision Encoder -> LLM -> locate(x1, y1, x2, y2)
+                                                        |
+                                            Cross-entropy vs ground-truth hitbox
+
+Stage 2 — GRPO (Shooting):
 Game Frames (512x512) -> Vision Encoder -> LLM -> shoot(x, y, horizon)
                                                         |
                                         Environment simulates shot -> reward
@@ -37,7 +45,9 @@ Game Frames (512x512) -> Vision Encoder -> LLM -> shoot(x, y, horizon)
                                                    GRPO update
 ```
 
-The training pipeline uses **Group Relative Policy Optimization (GRPO)** — a reinforcement learning algorithm that samples multiple shot predictions for each game state, scores them against the environment, and updates the model toward better-rewarded outputs.
+**SFT** teaches the model to **detect** ducks — predicting the hitbox coordinates where the duck will be after processing latency. Ground-truth hitboxes are computed from the physics engine.
+
+**GRPO** teaches the model to **shoot** — using the spatial understanding from SFT to learn an optimal shooting policy through reinforcement learning.
 
 The action space is a single function call with three parameters:
 
@@ -120,32 +130,44 @@ cd horizon_min
 uv sync --extra training
 ```
 
-### Train
+### Train (recommended: SFT → GRPO)
 
 ```bash
 cd training
 
-# LFM2-VL-3B (single GPU)
-python train.py --config configs/liquidai_3b_config.yaml --custom \
-    --override training.max_steps=25000 \
-    --override grpo.curriculum_phase2_step=15000
+# 1. Generate SFT dataset (duck detection labels)
+python generate_sft_data.py --num-samples 2000 --output sft_dataset
 
-# LFM2-VL-3B (2x GPU with Accelerate)
+# 2. SFT: teach model where ducks are
+python train_sft.py --dataset sft_dataset --model LiquidAI/LFM2-VL-3B \
+    --output outputs/sft_3b
+
+# 3. Merge SFT into base model
+python merge_sft_adapter.py --base LiquidAI/LFM2-VL-3B \
+    --adapter outputs/sft_3b/final --output outputs/sft_3b_merged
+
+# 4. GRPO: teach model to shoot
+python train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override model.model_name=outputs/sft_3b_merged \
+    --override training.max_steps=15000
+```
+
+### Train (GRPO only, any model)
+
+```bash
+# LFM2-VL-3B (2x GPU)
 accelerate launch --num_processes=2 --mixed_precision=bf16 \
     train.py --config configs/liquidai_3b_config.yaml --custom \
-    --override training.max_steps=25000 \
-    --override grpo.curriculum_phase2_step=15000
+    --override training.max_steps=25000
 
-# LFM2.5-VL-1.6B
-python train.py --config configs/liquidai_config.yaml --custom \
+# Qwen3-VL-8B (2x GPU)
+accelerate launch --num_processes=2 --mixed_precision=bf16 \
+    train.py --config configs/qwen3_vl_8b_config.yaml --custom \
     --override training.max_steps=25000 \
-    --override grpo.curriculum_phase2_step=15000
-
-# Push to HuggingFace Hub
-python train.py --config configs/liquidai_3b_config.yaml --custom \
-    --override training.max_steps=25000 \
-    --push-to-hub --hub-model-id username/duckhunt-model
+    --override model.quantization=null
 ```
+
+See [training/TRAINING.md](training/TRAINING.md) for full commands, parameters, and pipeline details.
 
 ### Evaluate
 
