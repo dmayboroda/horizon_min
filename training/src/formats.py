@@ -405,11 +405,161 @@ class LiquidAIFormat(ModelFormat):
 
 
 # ===================================================================
+#  Qwen format
+# ===================================================================
+class QwenFormat(ModelFormat):
+    """Qwen3-VL: uses standard OpenAI-style function calling via apply_chat_template.
+
+    Output format: ``<tool_call>{"name": "shoot", "arguments": {"x": 0.5, "y": 0.3, "horizon": 8}}</tool_call>``
+    """
+
+    TOOL_SCHEMA = {
+        "type": "function",
+        "function": {
+            "name": "shoot",
+            "description": (
+                "Fire at predicted duck position. "
+                "Analyze the frame sequence to estimate duck velocity, "
+                "then predict where the duck will be after "
+                "processing_latency_frames + horizon frames."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "number",
+                        "description": "Predicted horizontal position, normalised 0.0-1.0. 0.0 = left edge, 1.0 = right edge.",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Predicted vertical position, normalised 0.0-1.0. 0.0 = top edge, 1.0 = bottom edge.",
+                    },
+                    "horizon": {
+                        "type": "integer",
+                        "description": "Additional frames to wait before shooting (0-30). Total prediction = processing_latency_frames + horizon.",
+                    },
+                },
+                "required": ["x", "y", "horizon"],
+            },
+        },
+    }
+
+    TOOL_SCHEMA_PHASE1 = {
+        "type": "function",
+        "function": {
+            "name": "shoot",
+            "description": (
+                "Fire at predicted duck position. "
+                "Analyze the frame sequence to estimate duck velocity, "
+                "then predict where the duck will be after "
+                "processing_latency_frames frames."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "number",
+                        "description": "Predicted horizontal position, normalised 0.0-1.0. 0.0 = left edge, 1.0 = right edge.",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Predicted vertical position, normalised 0.0-1.0. 0.0 = top edge, 1.0 = bottom edge.",
+                    },
+                },
+                "required": ["x", "y"],
+            },
+        },
+    }
+
+    def get_tools(self, phase: int = 2) -> list[dict]:
+        if phase == 1:
+            return [self.TOOL_SCHEMA_PHASE1]
+        return [self.TOOL_SCHEMA]
+
+    def _make_fewshot(self, phase: int = 2) -> str:
+        x, y, h = _random_fewshot_values()
+        if phase == 1:
+            return f'<tool_call>{{"name": "shoot", "arguments": {{"x": {x}, "y": {y}}}}}</tool_call>'
+        return f'<tool_call>{{"name": "shoot", "arguments": {{"x": {x}, "y": {y}, "horizon": {h}}}}}</tool_call>'
+
+    def build_prompt(self, frames, state, num_frames=None, phase: int = 2):
+        if num_frames is None:
+            num_frames = len(frames)
+        latency_frames = state.get("simulated_latency_frames", 6)
+        system_prompt = format_system_prompt(
+            num_frames=num_frames, processing_latency_frames=latency_frames,
+            phase=phase,
+        )
+        user_content = self._build_user_content(frames, state, latency_frames, num_frames)
+
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+            {"role": "user", "content": [{"type": "text", "text": (
+                "Frame sequence: 2 frames. Ducks flying: 2. "
+                "Latency: 6 frames. Call the shoot tool now."
+            )}]},
+            {"role": "assistant", "content": [{"type": "text", "text": self._make_fewshot(phase=phase)}]},
+            {"role": "user", "content": user_content},
+        ]
+        return messages, self.get_tools(phase=phase)
+
+    def parse_tool_call(self, output_text, max_horizon=30, phase: int = 2):
+        # --- Qwen <tool_call>{"name": "shoot", "arguments": {...}}</tool_call> ---
+        tc_match = re.search(
+            r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+            output_text, re.DOTALL,
+        )
+        if tc_match:
+            try:
+                call = json.loads(tc_match.group(1))
+                args = call.get("arguments", call)
+                if isinstance(args, str):
+                    args = json.loads(args)
+                if "x" in args and "y" in args:
+                    horizon = "0" if phase == 1 else args.get("horizon", "0")
+                    return _build_action(args["x"], args["y"], horizon, max_horizon)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        # --- Fallback: any JSON with "name": "shoot" ---
+        json_match = re.search(
+            r'\{[^{}]*"name"\s*:\s*"shoot"[^{}]*"arguments"\s*:\s*(\{[^{}]*\})',
+            output_text, re.DOTALL,
+        )
+        if json_match:
+            try:
+                args = json.loads(json_match.group(1))
+                if "x" in args and "y" in args:
+                    horizon = "0" if phase == 1 else args.get("horizon", "0")
+                    return _build_action(args["x"], args["y"], horizon, max_horizon)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        # --- Fallback: raw JSON object with x/y ---
+        action = self._try_json_fallback(output_text, max_horizon)
+        if action:
+            if phase == 1:
+                return Action(x=action.x, y=action.y, horizon=0)
+            return action
+
+        # --- Fallback: key=value ---
+        action = self._try_kv_fallback(output_text, max_horizon)
+        if action:
+            if phase == 1:
+                return Action(x=action.x, y=action.y, horizon=0)
+            return action
+
+        logger.warning("Failed to parse Qwen tool call from: %s", output_text[:200])
+        return None
+
+
+# ===================================================================
 #  Registry / factory
 # ===================================================================
 _FORMATS: dict[str, type[ModelFormat]] = {
     "mistral": MistralFormat,
     "liquidai": LiquidAIFormat,
+    "qwen": QwenFormat,
 }
 
 # Model name prefixes → format key
@@ -417,6 +567,7 @@ _MODEL_PREFIX_MAP: list[tuple[str, str]] = [
     ("mistralai/", "mistral"),
     ("liquidai/", "liquidai"),
     ("lfm", "liquidai"),
+    ("qwen/", "qwen"),
 ]
 
 

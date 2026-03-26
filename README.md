@@ -6,15 +6,17 @@ A vision-language model learns to play Duck Hunt from raw pixels — and discove
 
 The model outputs `shoot(x, y, horizon)` where `horizon` controls how many extra frames the game advances before the shot lands. A larger horizon gives more time to predict duck movement, but ducks bounce randomly off walls, so longer predictions accumulate more error. The training reward penalizes large horizons on hits, pushing the model to find the **minimum prediction window** needed for each shot. Hence the name — *horizon minimization*.
 
-**60.9% hit rate** after GRPO training with Ministral (up from ~0% base model, ~5% random baseline).
+Training in progress — experimenting with GRPO on LiquidAI VLMs.
 
-> **[Trained Model (Ministral)](https://huggingface.co/dmayboroda/dh_ministal_gpro)** · Base: [Ministral-3-8B](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) (8.4B LLM + 0.4B Pixtral vision)
+> **[Trained Model (LFM2-VL-3B)](https://huggingface.co/dmayboroda/duckhunt_liquidai_3b_grpo)** · Base: [LFM2-VL-3B](https://huggingface.co/LiquidAI/LFM2-VL-3B)
+>
+> **[Demo Space](https://huggingface.co/spaces/dmayboroda/duckhunt_liquidai_1.6b)** · Watch the model play Duck Hunt
 
 ## Supported Models
 
 | Model | Params | Tool-call format | VRAM (BF16) |
 |-------|--------|------------------|-------------|
-| [Ministral-3-8B](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-BF16) | 8.4B LLM + 0.4B Pixtral | `[TOOL_CALLS] [{"name":"shoot",...}]` | 24GB |
+| [LFM2-VL-3B](https://huggingface.co/LiquidAI/LFM2-VL-3B) | ~3B | `<\|tool_call_start\|>[shoot(...)]<\|tool_call_end\|>` | 16GB |
 | [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) | 1.2B LFM + 400M SigLIP2 | `<\|tool_call_start\|>[shoot(...)]<\|tool_call_end\|>` | 8GB |
 
 The model family is **auto-detected** from the config — one training script handles all models. See [training/README.md](training/README.md) for details.
@@ -53,8 +55,8 @@ The model is trained across multiple latency buckets, forcing it to generalize r
 
 | Model | Latency range | Based on |
 |-------|--------------|----------|
-| Ministral | 100–600ms | Simulated range |
-| LiquidAI | 50–600ms | Measured processing times (2 frames=100ms, 10 frames=200ms, 20 frames=300ms) |
+| LFM2-VL-3B | 150–500ms | Measured processing times |
+| LFM2.5-VL-1.6B | 100–300ms | Measured processing times |
 
 A horizon penalty (`-0.1 * horizon/30`) on successful hits encourages the model to shoot quickly when it can.
 
@@ -91,15 +93,15 @@ Two reward signals are combined: **accuracy** (did the shot hit?) and **format**
 
 The unified training script auto-detects the model family and applies the right tool-call format:
 
-| | Ministral | LiquidAI (LoRA) | LiquidAI (Full) |
-|---|-----------|-----------------|------------------|
-| **LoRA targets** | q/k/v/o_proj | q/k/v/out_proj + in_proj + w1/w2/w3 | — |
-| **Trainable params** | ~0.2% | ~1.5% | 100% |
-| **Learning rate** | 5e-6 | 5e-6 | 5e-6 |
-| **Generations per state** | 4 | 6 | 4 |
-| **Tool format** | Mistral JSON | LiquidAI Pythonic | LiquidAI Pythonic |
+| | LFM2-VL-3B | LFM2.5-VL-1.6B |
+|---|-----------|-----------------|
+| **LoRA targets** | q/k/v/out_proj + in_proj + w1/w2/w3 | q/k/v/out_proj + in_proj + w1/w2/w3 |
+| **LoRA r/alpha** | 16/16 | 16/16 |
+| **Learning rate** | 2e-5 | 1e-5 |
+| **Generations per state** | 6 | 6 |
+| **Tool format** | LiquidAI Pythonic | LiquidAI Pythonic |
 
-**Input**: 4 observation frames (with configurable frame skip for visible duck displacement) + latency metadata
+**Input**: 2 observation frames (with frame_skip=6 for visible duck displacement) + latency metadata
 
 **Output**: Native tool calls in the model's format, directly servable via vLLM/SGLang with the OpenAI SDK
 
@@ -123,24 +125,26 @@ uv sync --extra training
 ```bash
 cd training
 
-# Mistral with LoRA
-./run_training.sh --config configs/ministral_config.yaml
+# LFM2-VL-3B (single GPU)
+python train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000
 
-# LiquidAI with LoRA
-./run_training.sh --config configs/liquidai_config.yaml
+# LFM2-VL-3B (2x GPU with Accelerate)
+accelerate launch --num_processes=2 --mixed_precision=bf16 \
+    train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000
 
-# LiquidAI full fine-tune (no LoRA)
-./run_training.sh --config configs/liquidai_nolora_config.yaml
-
-# Custom GRPO loop (online environment interaction)
-./run_training.sh --config configs/liquidai_config.yaml --custom
-
-# Without W&B
-./run_training.sh --config configs/liquidai_config.yaml --no-wandb
-
-# Direct python (if deps already installed)
+# LFM2.5-VL-1.6B
 python train.py --config configs/liquidai_config.yaml --custom \
-    --override training.max_steps=5000
+    --override training.max_steps=25000 \
+    --override grpo.curriculum_phase2_step=15000
+
+# Push to HuggingFace Hub
+python train.py --config configs/liquidai_3b_config.yaml --custom \
+    --override training.max_steps=25000 \
+    --push-to-hub --hub-model-id username/duckhunt-model
 ```
 
 ### Evaluate
@@ -174,12 +178,12 @@ A headless Duck Hunt implementation with no display required — pure Python API
 | Screen | 800 x 500 px |
 | Model input | 512 x 512 px |
 | FPS | 30 |
-| Duck speed | 6 + round to 10 + round px/frame |
-| Hitbox | 40 x 36 px (centered on 81x75 sprite) |
-| Spawn | Off-screen left/right edge, random Y height |
-| Mid-flight jitter | 3% chance/frame of direction nudge |
-| Bounce speed jitter | +/-15% variation on wall bounce |
-| Frame skip | 3 (observation frames spaced apart for visible displacement) |
+| Duck speed | 3 + round to 5 + round px/frame |
+| Hitbox | 80 x 70 px (centered on 81x75 sprite) |
+| Spawn | Off-screen left/right/top edge, Y range 20-70% |
+| Mid-flight jitter | Disabled (straight-line flight) |
+| Bounce speed jitter | Disabled (predictable bounces) |
+| Frame skip | 6 (observation frames spaced apart for visible displacement) |
 | Match duration | 30s |
 | Ducks per match | 2 |
 | Bullets per match | 3 |
@@ -262,7 +266,7 @@ horizon_min/
 
 ## Why This Matters
 
-This demonstrates that small vision-language models can learn reactive, spatiotemporal reasoning from reinforcement learning alone — no human demonstrations, no reward shaping beyond hit/miss. The latency-aware design mirrors real-world deployment constraints where models must predict ahead to compensate for inference time.
+This explores whether vision-language models can learn reactive, spatiotemporal reasoning from reinforcement learning. The latency-aware design mirrors real-world deployment constraints where models must predict ahead to compensate for inference time. Active research — see [training/REWARD.md](training/REWARD.md) for the full reward system documentation.
 
 ## License
 
