@@ -178,16 +178,25 @@ def train_sft(
 
     is_main = accelerator.is_main_process if accelerator else True
 
-    # Load dataset
-    records = load_sft_dataset(dataset_dir)
+    # Load dataset and split into train/val
+    all_records = load_sft_dataset(dataset_dir)
+    random.shuffle(all_records)
 
-    # In distributed mode, split dataset across ranks
+    val_size = max(1, int(len(all_records) * 0.1))  # 10% validation
+    val_records = all_records[:val_size]
+    train_records = all_records[val_size:]
+
+    if is_main:
+        logger.info("Train/val split: %d train, %d val", len(train_records), len(val_records))
+
+    # In distributed mode, split TRAIN records across ranks (val stays full on each rank)
     if distributed:
         rank = accelerator.process_index
         num_ranks = accelerator.num_processes
-        records = [r for i, r in enumerate(records) if i % num_ranks == rank]
-        logger.info("Rank %d: %d records (of %d total)", rank, len(records), len(records) * num_ranks)
+        train_records = [r for i, r in enumerate(train_records) if i % num_ranks == rank]
+        logger.info("Rank %d: %d train records", rank, len(train_records))
 
+    records = train_records
     random.shuffle(records)
 
     # Load model + processor
@@ -363,9 +372,44 @@ def train_sft(
         if is_main:
             avg_epoch_loss = epoch_loss / max(epoch_samples, 1)
             logger.info(
-                "Epoch %d complete: avg_loss=%.4f, samples=%d",
+                "Epoch %d complete: train_loss=%.4f, samples=%d",
                 epoch + 1, avg_epoch_loss, epoch_samples,
             )
+
+        # Validation — run on main process only
+        if is_main:
+            model.eval()
+            val_loss = 0.0
+            val_samples = 0
+
+            with torch.no_grad():
+                for val_record in val_records:
+                    val_sample = build_training_sample(val_record, processor, device)
+                    if val_sample is None:
+                        continue
+
+                    val_out = model(
+                        input_ids=val_sample["input_ids"],
+                        attention_mask=val_sample["attention_mask"],
+                        labels=val_sample["labels"],
+                    )
+                    val_loss += val_out.loss.item()
+                    val_samples += 1
+
+            avg_val_loss = val_loss / max(val_samples, 1)
+            logger.info(
+                "Epoch %d validation: val_loss=%.4f, val_samples=%d",
+                epoch + 1, avg_val_loss, val_samples,
+            )
+
+            if wandb_active:
+                wandb.log({
+                    "sft/val_loss": avg_val_loss,
+                    "sft/train_loss_epoch": avg_epoch_loss,
+                    "sft/epoch": epoch + 1,
+                })
+
+            model.train()
 
     # Final save — main process only
     if is_main:
