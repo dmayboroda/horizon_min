@@ -41,6 +41,57 @@ try:
 except ImportError:
     _WANDB = False
 
+import re
+
+
+# ---------------------------------------------------------------------------
+# Visualization helpers
+# ---------------------------------------------------------------------------
+def _parse_locate_call(text: str) -> tuple[float, float, float, float] | None:
+    """Parse locate(x1=..., y1=..., x2=..., y2=...) from model output."""
+    match = re.search(
+        r"locate\s*\("
+        r".*?x1\s*=\s*([0-9.]+).*?y1\s*=\s*([0-9.]+)"
+        r".*?x2\s*=\s*([0-9.]+).*?y2\s*=\s*([0-9.]+)",
+        text, re.DOTALL,
+    )
+    if match:
+        try:
+            return (
+                float(match.group(1)), float(match.group(2)),
+                float(match.group(3)), float(match.group(4)),
+            )
+        except ValueError:
+            pass
+    return None
+
+
+def _draw_bbox(
+    frame: Image.Image,
+    x1: float, y1: float, x2: float, y2: float,
+    color: tuple = (0, 255, 0),
+    label: str = "",
+    width: int = 3,
+) -> Image.Image:
+    """Draw a bounding box on a copy of the frame. Coords are normalized 0-1."""
+    from PIL import ImageDraw, ImageFont
+
+    img = frame.copy().convert("RGB")
+    w, h = img.size
+    draw = ImageDraw.Draw(img)
+
+    px1 = int(x1 * w)
+    py1 = int(y1 * h)
+    px2 = int(x2 * w)
+    py2 = int(y2 * h)
+
+    draw.rectangle([px1, py1, px2, py2], outline=color, width=width)
+
+    if label:
+        draw.text((px1 + 2, py1 - 14), label, fill=color)
+
+    return img
+
 
 # ---------------------------------------------------------------------------
 # Dataset loading
@@ -378,23 +429,83 @@ def train_sft(
 
         # Validation — run on main process only
         if is_main:
-            model.eval()
+            gen_model = accelerator.unwrap_model(model) if distributed else model
+            gen_model.eval()
             val_loss = 0.0
             val_samples = 0
+            val_wandb_images = []
+            num_visual_samples = 8  # number of samples to visualize
 
             with torch.no_grad():
-                for val_record in val_records:
+                for vi, val_record in enumerate(val_records):
                     val_sample = build_training_sample(val_record, processor, device)
                     if val_sample is None:
                         continue
 
-                    val_out = model(
+                    val_out = gen_model(
                         input_ids=val_sample["input_ids"],
                         attention_mask=val_sample["attention_mask"],
                         labels=val_sample["labels"],
                     )
                     val_loss += val_out.loss.item()
                     val_samples += 1
+
+                    # Visual logging: generate prediction for a few samples
+                    if vi < num_visual_samples and wandb_active:
+                        # Run inference to get predicted hitbox
+                        prompt_len = val_sample["prompt_len"]
+                        gen_ids = gen_model.generate(
+                            input_ids=val_sample["input_ids"][:, :prompt_len],
+                            attention_mask=val_sample["attention_mask"][:, :prompt_len],
+                            max_new_tokens=60,
+                            do_sample=False,
+                        )
+                        pred_tokens = gen_ids[0, prompt_len:]
+                        pred_text = processor.decode(pred_tokens, skip_special_tokens=False)
+                        pred_bbox = _parse_locate_call(pred_text)
+
+                        # Ground truth hitbox
+                        gt_bbox = (val_record["x1"], val_record["y1"],
+                                   val_record["x2"], val_record["y2"])
+
+                        # Load input frame (second frame — most recent)
+                        img_paths = val_record["image_paths"]
+                        frame = Image.open(img_paths[-1]).convert("RGB")
+
+                        # Draw ground truth (green)
+                        annotated = _draw_bbox(
+                            frame, gt_bbox[0], gt_bbox[1], gt_bbox[2], gt_bbox[3],
+                            color=(0, 255, 0), label="GT",
+                        )
+
+                        # Draw prediction (red) if parsed
+                        if pred_bbox:
+                            annotated = _draw_bbox(
+                                annotated, pred_bbox[0], pred_bbox[1],
+                                pred_bbox[2], pred_bbox[3],
+                                color=(255, 0, 0), label="PRED",
+                            )
+                            pred_str = f"({pred_bbox[0]:.2f},{pred_bbox[1]:.2f})→({pred_bbox[2]:.2f},{pred_bbox[3]:.2f})"
+                        else:
+                            pred_str = f"PARSE_FAIL: {pred_text[:80]}"
+
+                        gt_str = f"({gt_bbox[0]:.2f},{gt_bbox[1]:.2f})→({gt_bbox[2]:.2f},{gt_bbox[3]:.2f})"
+
+                        # Input frames
+                        input_frame = Image.open(img_paths[0]).convert("RGB")
+                        val_wandb_images.append(wandb.Image(
+                            input_frame,
+                            caption=f"val_{vi} input frame 0",
+                        ))
+                        val_wandb_images.append(wandb.Image(
+                            annotated,
+                            caption=f"val_{vi} lat={val_record['latency_frames']}f GT={gt_str} PRED={pred_str}",
+                        ))
+
+                        logger.info(
+                            "  val[%d] GT=%s PRED=%s",
+                            vi, gt_str, pred_str,
+                        )
 
             avg_val_loss = val_loss / max(val_samples, 1)
             logger.info(
@@ -403,11 +514,14 @@ def train_sft(
             )
 
             if wandb_active:
-                wandb.log({
+                log_dict = {
                     "sft/val_loss": avg_val_loss,
                     "sft/train_loss_epoch": avg_epoch_loss,
                     "sft/epoch": epoch + 1,
-                })
+                }
+                if val_wandb_images:
+                    log_dict["sft/val_predictions"] = val_wandb_images
+                wandb.log(log_dict)
 
             model.train()
 
