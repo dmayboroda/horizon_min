@@ -791,13 +791,15 @@ class DuckHuntGRPOTrainer:
             # Restore RNG and ducks from snapshot
             _rng_restore(snap["rng_state"])
             duck_a = _restore_duck(snap["duck_a"], round_number)
-            duck_b = _restore_duck(snap["duck_b"], round_number)
+            has_duck_b = "duck_b" in snap
+            duck_b = _restore_duck(snap["duck_b"], round_number) if has_duck_b else None
 
             # Advance by latency + horizon (same as simulate_shot)
             total_advance = latency_frames + action.horizon
             for _ in range(total_advance):
                 duck_a.update(round_number)
-                duck_b.update(round_number)
+                if duck_b is not None:
+                    duck_b.update(round_number)
 
             # Build a game_state dict for the renderer
             game_state = {
@@ -806,12 +808,13 @@ class DuckHuntGRPOTrainer:
                     "state": duck_a.state.value,
                     "sprite_dir": duck_a.sprite_dir,
                 },
-                "duck_b": {
+            }
+            if duck_b is not None:
+                game_state["duck_b"] = {
                     "x": duck_b.x, "y": duck_b.y,
                     "state": duck_b.state.value,
                     "sprite_dir": duck_b.sprite_dir,
-                },
-            }
+                }
 
             # Render using the environment's renderer
             renderer = self.env._env.renderer
@@ -822,10 +825,11 @@ class DuckHuntGRPOTrainer:
                 frame, duck_a.x, duck_a.y, duck_a.state.value,
                 color=(255, 255, 0), label="A",
             )
-            frame = self._draw_hitbox(
-                frame, duck_b.x, duck_b.y, duck_b.state.value,
-                color=(0, 255, 255), label="B",
-            )
+            if duck_b is not None:
+                frame = self._draw_hitbox(
+                    frame, duck_b.x, duck_b.y, duck_b.state.value,
+                    color=(0, 255, 255), label="B",
+                )
             return frame
 
         except Exception as e:

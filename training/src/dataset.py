@@ -90,15 +90,17 @@ def capture_snapshot(env_wrapper) -> dict:
     inner = env_wrapper._env
     match = inner.round.current_match
 
-    return {
+    snap = {
         "duck_a": _snapshot_duck(match.duck_a),
-        "duck_b": _snapshot_duck(match.duck_b),
         "round_number": inner.round_number,
         "bullets_remaining": match.bullets_remaining,
         "frames_elapsed": match.frames_elapsed,
         "latency_frames": inner.latency_frames,
         "rng_state": json.dumps(random.getstate(), default=_rng_serial),
     }
+    if match.duck_b is not None:
+        snap["duck_b"] = _snapshot_duck(match.duck_b)
+    return snap
 
 
 def _rng_serial(obj: Any) -> Any:
@@ -201,34 +203,36 @@ def simulate_shot(
     _rng_restore(snapshot["rng_state"])
 
     duck_a = _restore_duck(snapshot["duck_a"], round_number)
-    duck_b = _restore_duck(snapshot["duck_b"], round_number)
+    has_duck_b = "duck_b" in snapshot
+    duck_b = _restore_duck(snapshot["duck_b"], round_number) if has_duck_b else None
 
     # Check if ducks were flying at observation time (before processing)
-    had_target_at_obs = (
-        duck_a.state == DuckState.FLYING or duck_b.state == DuckState.FLYING
-    )
+    had_target_at_obs = duck_a.state == DuckState.FLYING
+    if duck_b is not None:
+        had_target_at_obs = had_target_at_obs or duck_b.state == DuckState.FLYING
 
     # Advance by latency + horizon (same as DuckHuntEnvironment.step)
     total_advance = latency_frames + action.horizon
     for _ in range(total_advance):
         duck_a.update(round_number)
-        duck_b.update(round_number)
+        if duck_b is not None:
+            duck_b.update(round_number)
 
     # Check duck states AFTER advancing (they might have escaped/fallen)
-    had_target_at_shot = (
-        duck_a.state == DuckState.FLYING or duck_b.state == DuckState.FLYING
-    )
+    had_target_at_shot = duck_a.state == DuckState.FLYING
+    if duck_b is not None:
+        had_target_at_shot = had_target_at_shot or duck_b.state == DuckState.FLYING
 
     # Convert normalised coords → pixels
     pixel_x = int(action.x * SCREEN_WIDTH)
     pixel_y = int(action.y * SCREEN_HEIGHT)
 
     hit_a = duck_a.check_hit(pixel_x, pixel_y)
-    hit_b = duck_b.check_hit(pixel_x, pixel_y)
+    hit_b = duck_b.check_hit(pixel_x, pixel_y) if duck_b is not None else False
 
     # Return duck positions (normalised) for distance-based reward shaping
     duck_a_norm = (duck_a.x / SCREEN_WIDTH, duck_a.y / SCREEN_HEIGHT)
-    duck_b_norm = (duck_b.x / SCREEN_WIDTH, duck_b.y / SCREEN_HEIGHT)
+    duck_b_norm = (duck_b.x / SCREEN_WIDTH, duck_b.y / SCREEN_HEIGHT) if duck_b is not None else None
 
     return {
         "hit_a": hit_a, "hit_b": hit_b,
@@ -236,7 +240,7 @@ def simulate_shot(
         "had_target_at_shot": had_target_at_shot,
         "duck_a_pos": duck_a_norm, "duck_b_pos": duck_b_norm,
         "duck_a_state": duck_a.state.value,
-        "duck_b_state": duck_b.state.value,
+        "duck_b_state": duck_b.state.value if duck_b is not None else "none",
         "shot_pos": (action.x, action.y),
     }
 

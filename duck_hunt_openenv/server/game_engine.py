@@ -193,12 +193,12 @@ class Duck:
 
 
 class Match:
-    """A single match with two ducks."""
+    """A single match with one or two ducks."""
 
     def __init__(self, round_number: int):
         self.round_number = round_number
         self.duck_a = Duck(round_number)
-        self.duck_b = Duck(round_number)
+        self.duck_b = Duck(round_number) if DUCKS_PER_MATCH >= 2 else None
         self.bullets_remaining = BULLETS_PER_MATCH
         self.frames_elapsed = 0
         self.ducks_hit = 0
@@ -209,7 +209,8 @@ class Match:
             if self.is_complete:
                 break
             self.duck_a.update(self.round_number)
-            self.duck_b.update(self.round_number)
+            if self.duck_b is not None:
+                self.duck_b.update(self.round_number)
             self.frames_elapsed += 1
 
     def process_shot(self, x: int, y: int) -> tuple[bool, bool]:
@@ -220,7 +221,7 @@ class Match:
         self.bullets_remaining -= 1
 
         hit_a = self.duck_a.check_hit(x, y)
-        hit_b = self.duck_b.check_hit(x, y)
+        hit_b = self.duck_b.check_hit(x, y) if self.duck_b is not None else False
 
         if hit_a:
             self.duck_a.hit()
@@ -235,42 +236,43 @@ class Match:
     @property
     def is_complete(self) -> bool:
         """Check if match is complete."""
-        both_resolved = (
-            self.duck_a.state != DuckState.FLYING
-            and self.duck_b.state != DuckState.FLYING
-        )
+        a_resolved = self.duck_a.state != DuckState.FLYING
+        b_resolved = self.duck_b.state != DuckState.FLYING if self.duck_b is not None else True
+        all_resolved = a_resolved and b_resolved
         time_up = self.frames_elapsed >= MATCH_DURATION_FRAMES
-        return both_resolved or time_up
+        return all_resolved or time_up
 
     def get_flying_count(self) -> int:
         """Count ducks that are still flying."""
         count = 0
         if self.duck_a.state == DuckState.FLYING:
             count += 1
-        if self.duck_b.state == DuckState.FLYING:
+        if self.duck_b is not None and self.duck_b.state == DuckState.FLYING:
             count += 1
         return count
 
     def get_state(self) -> dict:
         """Return current match state for observation."""
-        return {
+        state = {
             "duck_a": {
                 "x": self.duck_a.x,
                 "y": self.duck_a.y,
                 "state": self.duck_a.state.value,
                 "sprite_dir": self.duck_a.sprite_dir,
             },
-            "duck_b": {
-                "x": self.duck_b.x,
-                "y": self.duck_b.y,
-                "state": self.duck_b.state.value,
-                "sprite_dir": self.duck_b.sprite_dir,
-            },
             "bullets_remaining": self.bullets_remaining,
             "frames_elapsed": self.frames_elapsed,
             "ducks_hit": self.ducks_hit,
             "flying_count": self.get_flying_count(),
         }
+        if self.duck_b is not None:
+            state["duck_b"] = {
+                "x": self.duck_b.x,
+                "y": self.duck_b.y,
+                "state": self.duck_b.state.value,
+                "sprite_dir": self.duck_b.sprite_dir,
+            }
+        return state
 
 
 class Round:
