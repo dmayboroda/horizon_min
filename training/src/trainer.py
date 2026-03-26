@@ -517,8 +517,9 @@ class DuckHuntGRPOTrainer:
             # If the shot is close to a duck (min_distance < 0.3), it's legitimate aiming.
             # If the shot is far from any duck AND in a hotspot, it's exploitation.
             if self.cfg.reward.hotspot_enabled and action is not None and reward > 0 and len(self._recent_shots) >= 10:
-                # Only apply hotspot if shot is NOT near a duck
-                is_near_duck = bd.min_distance >= 0 and bd.min_distance < 0.3
+                # Only apply hotspot if shot is NOT near a duck.
+                # Hits are always near a duck — skip hotspot for hits.
+                is_near_duck = is_hit or (bd.min_distance >= 0 and bd.min_distance < 0.3)
                 if not is_near_duck:
                     shot_pos = (action.x, action.y)
                     nearby = sum(
