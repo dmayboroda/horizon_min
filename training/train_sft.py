@@ -1,11 +1,17 @@
-"""SFT training for Duck Hunt VLM — teaches spatial coordinate prediction.
+"""SFT training for Duck Hunt VLM — teaches duck detection via hitbox prediction.
 
-Trains the model to output correct shoot(x, y) coordinates given game frames.
-Uses standard cross-entropy loss on completion tokens only.
+Trains the model to output locate(x1, y1, x2, y2) — the duck's hitbox coordinates
+after latency frames. Uses standard cross-entropy loss on completion tokens only.
+
+Supports single GPU and multi-GPU (via Accelerate).
 
 Usage:
-    python train_sft.py --dataset sft_dataset --model LiquidAI/LFM2.5-VL-1.6B
-    python train_sft.py --dataset sft_dataset --model LiquidAI/LFM2-VL-3B --lr 2e-5
+    # Single GPU
+    python train_sft.py --dataset sft_dataset --model LiquidAI/LFM2-VL-3B
+
+    # 2x GPU
+    accelerate launch --num_processes=2 --mixed_precision=bf16 \
+        train_sft.py --dataset sft_dataset --model LiquidAI/LFM2-VL-3B
 """
 
 from __future__ import annotations
@@ -13,11 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import get_scheduler
 from PIL import Image
@@ -58,7 +64,7 @@ def build_training_sample(
 ) -> dict | None:
     """Build tokenized input/labels for one SFT sample.
 
-    Returns dict with 'input_ids', 'attention_mask', 'labels', 'pixel_values'.
+    Returns dict with 'input_ids', 'attention_mask', 'labels'.
     Labels = -100 for prompt tokens, real IDs for completion tokens.
     """
     # Load images
@@ -147,12 +153,41 @@ def train_sft(
     wandb_run_name: str | None = None,
     seed: int = 42,
 ) -> None:
-    """Run SFT training."""
+    """Run SFT training with optional distributed support."""
     random.seed(seed)
     torch.manual_seed(seed)
 
+    # Detect distributed mode
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    distributed = world_size > 1
+
+    accelerator = None
+    if distributed:
+        from accelerate import Accelerator, DistributedDataParallelKwargs
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        accelerator = Accelerator(
+            mixed_precision="bf16",
+            kwargs_handlers=[ddp_kwargs],
+        )
+        logger.info(
+            "Distributed SFT: %d GPUs, rank %d, device %s",
+            accelerator.num_processes, accelerator.process_index, accelerator.device,
+        )
+        # Different seed per rank for data shuffling diversity
+        random.seed(seed + accelerator.process_index)
+
+    is_main = accelerator.is_main_process if accelerator else True
+
     # Load dataset
     records = load_sft_dataset(dataset_dir)
+
+    # In distributed mode, split dataset across ranks
+    if distributed:
+        rank = accelerator.process_index
+        num_ranks = accelerator.num_processes
+        records = [r for i, r in enumerate(records) if i % num_ranks == rank]
+        logger.info("Rank %d: %d records (of %d total)", rank, len(records), len(records) * num_ranks)
+
     random.shuffle(records)
 
     # Load model + processor
@@ -164,12 +199,14 @@ def train_sft(
         torch_dtype="bfloat16",
         attn_implementation="sdpa",
         trust_remote_code=True,
-        device_map="auto",
+        device_map="auto" if not distributed else None,
     )
 
     # Detect LoRA targets based on model
     if "lfm" in model_name.lower() or "liquid" in model_name.lower():
         target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "in_proj", "w1", "w2", "w3"]
+    elif "qwen" in model_name.lower():
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     else:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -181,23 +218,20 @@ def train_sft(
         target_modules=target_modules,
     )
 
-    model, processor = load_model_and_processor(model_config)
+    model, processor = load_model_and_processor(model_config, distributed=distributed)
     model = apply_lora(model, lora_config)
 
     # SFT uses right-padding (unlike GRPO which uses left)
     processor.tokenizer.padding_side = "right"
 
-    device = next(model.parameters()).device
-
     # Gradient checkpointing
     model.gradient_checkpointing_enable()
-    model.enable_input_require_grads()
 
     # Optimizer + scheduler
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=0.01)
 
-    total_steps = (len(records) * num_epochs) // (batch_size * grad_accum)
+    total_steps = (len(records) * num_epochs) // grad_accum
     warmup_steps = int(total_steps * warmup_ratio)
 
     scheduler = get_scheduler(
@@ -207,29 +241,42 @@ def train_sft(
         num_training_steps=total_steps,
     )
 
-    logger.info("SFT Training:")
-    logger.info("  Model: %s", model_name)
-    logger.info("  Dataset: %d records", len(records))
-    logger.info("  Epochs: %d", num_epochs)
-    logger.info("  Total steps: %d (warmup: %d)", total_steps, warmup_steps)
-    logger.info("  LR: %s, LoRA r=%d alpha=%d", learning_rate, lora_r, lora_alpha)
-    logger.info("  Grad accum: %d, effective batch: %d", grad_accum, batch_size * grad_accum)
+    # Wrap with Accelerate
+    if distributed:
+        model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+        device = accelerator.device
+    else:
+        device = next(model.parameters()).device
 
-    # W&B
-    if _WANDB and wandb_project:
+    if is_main:
+        logger.info("SFT Training:")
+        logger.info("  Model: %s", model_name)
+        logger.info("  Dataset: %d records (per rank)", len(records))
+        logger.info("  Epochs: %d", num_epochs)
+        logger.info("  Total optimizer steps: %d (warmup: %d)", total_steps, warmup_steps)
+        logger.info("  LR: %s, LoRA r=%d alpha=%d", learning_rate, lora_r, lora_alpha)
+        logger.info("  Grad accum: %d", grad_accum)
+        logger.info("  Distributed: %s (%d GPUs)", distributed, world_size)
+
+    # W&B — main process only
+    wandb_active = False
+    if _WANDB and wandb_project and is_main:
         wandb.init(
             project=wandb_project,
             name=wandb_run_name or f"sft-{model_name.split('/')[-1]}",
             config={
                 "model": model_name,
-                "dataset_size": len(records),
+                "dataset_size": len(records) * world_size,
                 "epochs": num_epochs,
                 "learning_rate": learning_rate,
                 "lora_r": lora_r,
                 "lora_alpha": lora_alpha,
                 "grad_accum": grad_accum,
+                "distributed": distributed,
+                "num_gpus": world_size,
             },
         )
+        wandb_active = True
 
     # Training
     model.train()
@@ -238,7 +285,8 @@ def train_sft(
     samples_processed = 0
 
     out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    if is_main:
+        out_path.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(num_epochs):
         random.shuffle(records)
@@ -257,7 +305,11 @@ def train_sft(
                 labels=sample["labels"],
             )
             loss = outputs.loss / grad_accum
-            loss.backward()
+
+            if distributed:
+                accelerator.backward(loss)
+            else:
+                loss.backward()
 
             running_loss += outputs.loss.item()
             epoch_loss += outputs.loss.item()
@@ -266,29 +318,32 @@ def train_sft(
 
             # Optimizer step
             if (i + 1) % grad_accum == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    trainable_params, max_grad_norm
-                )
+                if distributed:
+                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+                grad_norm_val = grad_norm.item() if hasattr(grad_norm, 'item') else float(grad_norm)
+
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
 
-                # Log
+                # Log — main process only
                 avg_loss = running_loss / grad_accum
                 lr = scheduler.get_last_lr()[0]
 
-                if global_step % 10 == 0:
+                if global_step % 10 == 0 and is_main:
                     logger.info(
                         "epoch=%d  step=%d  loss=%.4f  lr=%.2e  grad=%.4f",
-                        epoch + 1, global_step, avg_loss, lr, grad_norm.item(),
+                        epoch + 1, global_step, avg_loss, lr, grad_norm_val,
                     )
 
-                if _WANDB and wandb.run:
+                if wandb_active:
                     wandb.log({
                         "sft/loss": avg_loss,
                         "sft/learning_rate": lr,
-                        "sft/gradient_norm": grad_norm.item(),
+                        "sft/gradient_norm": grad_norm_val,
                         "sft/epoch": epoch + 1,
                         "sft/step": global_step,
                         "sft/samples_processed": samples_processed,
@@ -296,28 +351,32 @@ def train_sft(
 
                 running_loss = 0.0
 
-                # Save checkpoint
-                if global_step % save_steps == 0:
+                # Save checkpoint — main process only
+                if global_step % save_steps == 0 and is_main:
                     ckpt_dir = out_path / f"checkpoint-{global_step}"
                     ckpt_dir.mkdir(exist_ok=True)
-                    model.save_pretrained(str(ckpt_dir))
+                    unwrapped = accelerator.unwrap_model(model) if distributed else model
+                    unwrapped.save_pretrained(str(ckpt_dir))
                     processor.save_pretrained(str(ckpt_dir))
                     logger.info("Saved checkpoint to %s", ckpt_dir)
 
-        avg_epoch_loss = epoch_loss / max(epoch_samples, 1)
-        logger.info(
-            "Epoch %d complete: avg_loss=%.4f, samples=%d",
-            epoch + 1, avg_epoch_loss, epoch_samples,
-        )
+        if is_main:
+            avg_epoch_loss = epoch_loss / max(epoch_samples, 1)
+            logger.info(
+                "Epoch %d complete: avg_loss=%.4f, samples=%d",
+                epoch + 1, avg_epoch_loss, epoch_samples,
+            )
 
-    # Final save
-    final_dir = out_path / "final"
-    final_dir.mkdir(exist_ok=True)
-    model.save_pretrained(str(final_dir))
-    processor.save_pretrained(str(final_dir))
-    logger.info("Training complete. Final model saved to %s", final_dir)
+    # Final save — main process only
+    if is_main:
+        final_dir = out_path / "final"
+        final_dir.mkdir(exist_ok=True)
+        unwrapped = accelerator.unwrap_model(model) if distributed else model
+        unwrapped.save_pretrained(str(final_dir))
+        processor.save_pretrained(str(final_dir))
+        logger.info("Training complete. Final model saved to %s", final_dir)
 
-    if _WANDB and wandb.run:
+    if wandb_active:
         wandb.finish()
 
 
