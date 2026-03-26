@@ -72,26 +72,26 @@ def build_training_sample(
     for img_path in record["image_paths"]:
         images.append(Image.open(img_path).convert("RGB"))
 
-    # Build user content with images
+    # Build user content with images (multimodal format)
     user_content = []
     for img in images:
         user_content.append({"type": "image", "image": img})
     user_content.append({"type": "text", "text": record["user_text"]})
 
-    # Full conversation including ground-truth assistant response
+    # All content must use the list-of-dicts format for multimodal models
     full_messages = [
-        {"role": "system", "content": record["system_prompt"]},
-        {"role": "user", "content": record["user_fewshot"]},
-        {"role": "assistant", "content": record["assistant_fewshot"]},
+        {"role": "system", "content": [{"type": "text", "text": record["system_prompt"]}]},
+        {"role": "user", "content": [{"type": "text", "text": record["user_fewshot"]}]},
+        {"role": "assistant", "content": [{"type": "text", "text": record["assistant_fewshot"]}]},
         {"role": "user", "content": user_content},
-        {"role": "assistant", "content": record["completion"]},
+        {"role": "assistant", "content": [{"type": "text", "text": record["completion"]}]},
     ]
 
     # Prompt only (without the final assistant message)
     prompt_messages = [
-        {"role": "system", "content": record["system_prompt"]},
-        {"role": "user", "content": record["user_fewshot"]},
-        {"role": "assistant", "content": record["assistant_fewshot"]},
+        {"role": "system", "content": [{"type": "text", "text": record["system_prompt"]}]},
+        {"role": "user", "content": [{"type": "text", "text": record["user_fewshot"]}]},
+        {"role": "assistant", "content": [{"type": "text", "text": record["assistant_fewshot"]}]},
         {"role": "user", "content": user_content},
     ]
 
