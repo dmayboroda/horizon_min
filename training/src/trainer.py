@@ -721,6 +721,9 @@ class DuckHuntGRPOTrainer:
             "mean_entropy": mean_entropy,
             "entropy_floor_penalty": entropy_floor_penalty,
             "advantages_mean": advantages.mean().item(),
+            "advantages_std": advantages.std().item() if G > 1 else 0.0,
+            "advantages_max": advantages.max().item(),
+            "advantages_min": advantages.min().item(),
         }
 
         return total_loss, metrics
@@ -1090,6 +1093,9 @@ class DuckHuntGRPOTrainer:
                 "train/std_reward": metrics.get("std_reward", 0),
                 "train/learning_rate": lr,
                 "train/advantages_mean": metrics.get("advantages_mean", 0),
+                "train/advantages_std": metrics.get("advantages_std", 0),
+                "train/advantages_max": metrics.get("advantages_max", 0),
+                "train/advantages_min": metrics.get("advantages_min", 0),
                 "train/gradient_norm": grad_norm,
                 "train/hit_rate": hit_rate,
                 "train/mean_entropy": entropy,
