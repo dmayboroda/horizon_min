@@ -419,6 +419,12 @@ class DuckHuntGRPOTrainer:
         # Force a new match every step for diverse duck positions
         self.env.auto_advance_to_next_match()
 
+        # Randomize latency every step (not just on reset)
+        self.env._env.latency_ms = random.choice(self.env.config.latency_options_ms)
+        self.env._env.latency_frames = int(
+            self.env._env.latency_ms / 1000 * self.env.config.fps
+        )
+
         # Advance a few frames so ducks enter the screen from off-screen spawn
         self.env.advance_frames(random.randint(8, 25))
 
