@@ -110,19 +110,18 @@ def compute_ground_truth(
     snapshot: dict,
     target_duck_key: str,
     latency_frames: int,
-) -> tuple[float, float, float, float] | None:
-    """Simulate duck forward by latency_frames and return the hitbox
-    coordinates (x1, y1, x2, y2) in normalized coords.
+) -> dict | None:
+    """Simulate duck forward by latency_frames and return hitbox coords + future game state.
 
-    Returns None if:
-    - The duck escapes/falls during simulation
-    - The duck is off-screen after simulation
-    - The hitbox is partially off-screen
+    Returns dict with:
+    - x1, y1, x2, y2: hitbox in normalized coords
+    - future_game_state: dict for rendering the future frame
+
+    Returns None if duck escapes/falls/off-screen.
     """
     round_number = snapshot["round_number"]
 
     # Restore RNG state so bounces are deterministic
-    # (duck.update() calls random.randint() when bouncing off walls)
     random.setstate(snapshot["rng_state"])
 
     # Restore both ducks — must update both to consume RNG in correct order
@@ -141,7 +140,6 @@ def compute_ground_truth(
     if target is None or target.state != DuckState.FLYING:
         return None
 
-    # Check duck is visible on screen after latency
     if not _is_duck_on_screen(target):
         return None
 
@@ -149,19 +147,35 @@ def compute_ground_truth(
     hx = target.x + (SPRITE_WIDTH - HITBOX_WIDTH) / 2
     hy = target.y + (SPRITE_HEIGHT - HITBOX_HEIGHT) / 2
 
-    # Check hitbox is fully on screen
     if hx < 0 or hx + HITBOX_WIDTH > SCREEN_WIDTH:
         return None
     if hy < 0 or hy + HITBOX_HEIGHT > SCREEN_HEIGHT:
         return None
 
-    # Normalize hitbox corners to 0-1
     x1 = round(hx / SCREEN_WIDTH, 3)
     y1 = round(hy / SCREEN_HEIGHT, 3)
     x2 = round((hx + HITBOX_WIDTH) / SCREEN_WIDTH, 3)
     y2 = round((hy + HITBOX_HEIGHT) / SCREEN_HEIGHT, 3)
 
-    return (x1, y1, x2, y2)
+    # Build future game state for rendering
+    future_state = {
+        "duck_a": {
+            "x": duck_a.x, "y": duck_a.y,
+            "state": duck_a.state.value,
+            "sprite_dir": duck_a.sprite_dir,
+        },
+    }
+    if duck_b is not None:
+        future_state["duck_b"] = {
+            "x": duck_b.x, "y": duck_b.y,
+            "state": duck_b.state.value,
+            "sprite_dir": duck_b.sprite_dir,
+        }
+
+    return {
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        "future_game_state": future_state,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +314,15 @@ def generate_dataset(
 
         target_key = random.choice(flying_ducks)
 
+        # Compute CURRENT hitbox position (for visualization)
+        duck_now = snapshot[target_key]
+        cur_hx = duck_now["x"] + (SPRITE_WIDTH - HITBOX_WIDTH) / 2
+        cur_hy = duck_now["y"] + (SPRITE_HEIGHT - HITBOX_HEIGHT) / 2
+        cur_x1 = round(cur_hx / SCREEN_WIDTH, 3)
+        cur_y1 = round(cur_hy / SCREEN_HEIGHT, 3)
+        cur_x2 = round((cur_hx + HITBOX_WIDTH) / SCREEN_WIDTH, 3)
+        cur_y2 = round((cur_hy + HITBOX_HEIGHT) / SCREEN_HEIGHT, 3)
+
         # Convert frames from base64 to PIL
         import base64
         from io import BytesIO
@@ -308,15 +331,25 @@ def generate_dataset(
             raw = base64.b64decode(b64)
             pil_frames.append(Image.open(BytesIO(raw)).convert("RGB"))
 
+        # Get renderer for future frames
+        renderer = inner.renderer
+
         # Generate one example per latency value
         generated_any = False
         for lat_ms, lat_frames in zip(latency_options_ms, latency_frames_list):
-            hitbox = compute_ground_truth(snapshot, target_key, lat_frames)
-            if hitbox is None:
+            result = compute_ground_truth(snapshot, target_key, lat_frames)
+            if result is None:
                 skipped += 1
                 continue
 
-            x1, y1, x2, y2 = hitbox
+            x1, y1, x2, y2 = result["x1"], result["y1"], result["x2"], result["y2"]
+
+            # Render future frame (what the game looks like when shot lands)
+            future_frame = renderer.render_and_resize(
+                result["future_game_state"], lat_frames,
+            )
+            future_frame_pil = future_frame.convert("RGB")
+
             example = build_sft_example(
                 frames=pil_frames,
                 latency_frames=lat_frames,
@@ -324,6 +357,12 @@ def generate_dataset(
                 ducks_flying=flying,
                 num_frames=2,
             )
+            # Store current position and future frame for visualization
+            example["cur_x1"] = cur_x1
+            example["cur_y1"] = cur_y1
+            example["cur_x2"] = cur_x2
+            example["cur_y2"] = cur_y2
+            example["future_frame"] = future_frame_pil
             all_examples.append(example)
             generated_any = True
 
@@ -351,12 +390,16 @@ def generate_dataset(
 
     dataset_records = []
     for i, ex in enumerate(all_examples):
-        # Save images
+        # Save observation images
         img_paths = []
         for j, img in enumerate(ex["images"]):
             img_path = images_dir / f"{i:06d}_frame{j}.png"
             img.save(str(img_path))
             img_paths.append(str(img_path))
+
+        # Save future frame
+        future_path = images_dir / f"{i:06d}_future.png"
+        ex["future_frame"].save(str(future_path))
 
         # Build record (without PIL objects)
         record = {
@@ -366,6 +409,9 @@ def generate_dataset(
             "latency_frames": ex["latency_frames"],
             "x1": ex["x1"], "y1": ex["y1"],
             "x2": ex["x2"], "y2": ex["y2"],
+            "cur_x1": ex["cur_x1"], "cur_y1": ex["cur_y1"],
+            "cur_x2": ex["cur_x2"], "cur_y2": ex["cur_y2"],
+            "future_frame_path": str(future_path),
             "system_prompt": ex["messages"][0]["content"],
             "user_fewshot": ex["messages"][1]["content"],
             "assistant_fewshot": ex["messages"][2]["content"],
