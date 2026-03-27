@@ -433,8 +433,9 @@ def train_sft(
             gen_model.eval()
             val_loss = 0.0
             val_samples = 0
-            val_wandb_images = []
-            num_visual_samples = 8  # number of samples to visualize
+            input_images = []        # separate W&B panel: input frames
+            future_images = []       # separate W&B panel: future frames with GT + pred boxes
+            num_visual_samples = 8
 
             with torch.no_grad():
                 for vi, val_record in enumerate(val_records):
@@ -450,7 +451,7 @@ def train_sft(
                     val_loss += val_out.loss.item()
                     val_samples += 1
 
-                    # Visual logging: generate prediction for a few samples
+                    # Visual logging for a few samples
                     if vi < num_visual_samples and wandb_active:
                         # Run inference to get predicted hitbox
                         prompt_len = val_sample["prompt_len"]
@@ -464,87 +465,52 @@ def train_sft(
                         pred_text = processor.decode(pred_tokens, skip_special_tokens=False)
                         pred_bbox = _parse_locate_call(pred_text)
 
-                        # Ground truth hitbox (future position)
                         gt_bbox = (val_record["x1"], val_record["y1"],
                                    val_record["x2"], val_record["y2"])
 
-                        # Current hitbox (where duck IS in the observation frame)
-                        cur_bbox = (
-                            val_record.get("cur_x1", 0), val_record.get("cur_y1", 0),
-                            val_record.get("cur_x2", 0), val_record.get("cur_y2", 0),
-                        )
-                        has_cur = cur_bbox[2] > 0  # check if current pos data exists
-
-                        # Load input frame (second frame — most recent)
-                        img_paths = val_record["image_paths"]
-                        frame = Image.open(img_paths[-1]).convert("RGB")
-
-                        # Draw current position (blue) — where duck IS now
-                        annotated = frame.copy()
-                        if has_cur:
-                            annotated = _draw_bbox(
-                                annotated, cur_bbox[0], cur_bbox[1], cur_bbox[2], cur_bbox[3],
-                                color=(0, 100, 255), label="NOW", width=2,
-                            )
-
-                        # Draw ground truth (green) — where duck WILL BE after latency
-                        annotated = _draw_bbox(
-                            annotated, gt_bbox[0], gt_bbox[1], gt_bbox[2], gt_bbox[3],
-                            color=(0, 255, 0), label="GT_FUTURE",
-                        )
-
-                        # Draw prediction (red) if parsed
                         if pred_bbox:
-                            annotated = _draw_bbox(
-                                annotated, pred_bbox[0], pred_bbox[1],
-                                pred_bbox[2], pred_bbox[3],
-                                color=(255, 0, 0), label="PRED",
-                            )
                             pred_str = f"({pred_bbox[0]:.2f},{pred_bbox[1]:.2f})→({pred_bbox[2]:.2f},{pred_bbox[3]:.2f})"
                         else:
-                            pred_str = f"PARSE_FAIL: {pred_text[:80]}"
-
+                            pred_str = f"PARSE_FAIL: {pred_text[:60]}"
                         gt_str = f"({gt_bbox[0]:.2f},{gt_bbox[1]:.2f})→({gt_bbox[2]:.2f},{gt_bbox[3]:.2f})"
 
-                        # 1. Input frame (what model sees)
-                        input_frame = Image.open(img_paths[0]).convert("RGB")
-                        val_wandb_images.append(wandb.Image(
-                            input_frame,
-                            caption=f"val_{vi} INPUT frame 0",
-                        ))
+                        # --- INPUT FRAMES panel ---
+                        img_paths = val_record["image_paths"]
+                        for fi, ip in enumerate(img_paths):
+                            input_images.append(wandb.Image(
+                                Image.open(ip).convert("RGB"),
+                                caption=f"val_{vi} frame_{fi} lat={val_record['latency_frames']}f",
+                            ))
 
-                        # 2. Observation frame with current + future + predicted boxes
-                        val_wandb_images.append(wandb.Image(
-                            annotated,
-                            caption=f"val_{vi} OBS lat={val_record['latency_frames']}f | BLUE=now GREEN=future RED=pred",
-                        ))
-
-                        # 3. Future frame (actual duck position when shot lands) with GT + pred boxes
+                        # --- FUTURE FRAME panel: GT box (green) + pred box (red) ---
                         future_path = val_record.get("future_frame_path")
                         if future_path and Path(future_path).exists():
                             future_frame = Image.open(future_path).convert("RGB")
 
-                            # Draw GT box on future frame (should align with duck)
+                            # Green = ground truth (should align with duck in this frame)
                             future_annotated = _draw_bbox(
-                                future_frame, gt_bbox[0], gt_bbox[1], gt_bbox[2], gt_bbox[3],
-                                color=(0, 255, 0), label="GT",
+                                future_frame,
+                                gt_bbox[0], gt_bbox[1], gt_bbox[2], gt_bbox[3],
+                                color=(0, 255, 0), label="GT", width=3,
                             )
-                            # Draw prediction on future frame
+
+                            # Red = model prediction
                             if pred_bbox:
                                 future_annotated = _draw_bbox(
-                                    future_annotated, pred_bbox[0], pred_bbox[1],
+                                    future_annotated,
+                                    pred_bbox[0], pred_bbox[1],
                                     pred_bbox[2], pred_bbox[3],
-                                    color=(255, 0, 0), label="PRED",
+                                    color=(255, 0, 0), label="PRED", width=3,
                                 )
 
-                            val_wandb_images.append(wandb.Image(
+                            future_images.append(wandb.Image(
                                 future_annotated,
-                                caption=f"val_{vi} FUTURE (shot lands here) | GREEN=GT RED=pred",
+                                caption=f"val_{vi} lat={val_record['latency_frames']}f GT={gt_str} PRED={pred_str}",
                             ))
 
                         logger.info(
-                            "  val[%d] GT=%s PRED=%s",
-                            vi, gt_str, pred_str,
+                            "  val[%d] lat=%df GT=%s PRED=%s",
+                            vi, val_record["latency_frames"], gt_str, pred_str,
                         )
 
             avg_val_loss = val_loss / max(val_samples, 1)
@@ -559,8 +525,10 @@ def train_sft(
                     "sft/train_loss_epoch": avg_epoch_loss,
                     "sft/epoch": epoch + 1,
                 }
-                if val_wandb_images:
-                    log_dict["sft/val_predictions"] = val_wandb_images
+                if input_images:
+                    log_dict["sft/val_input_frames"] = input_images
+                if future_images:
+                    log_dict["sft/val_future_frames"] = future_images
                 wandb.log(log_dict)
 
             model.train()
