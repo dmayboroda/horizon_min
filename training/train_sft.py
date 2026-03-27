@@ -266,7 +266,15 @@ def train_sft(
     # SFT needs vision encoder LoRA too — the LM alone can't learn to map
     # vision features to precise coordinates without tuning the vision side.
     if "lfm" in model_name.lower() or "liquid" in model_name.lower():
-        target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "in_proj", "w1", "w2", "w3"]
+        # LM decoder + vision encoder + vision-to-LM projector
+        target_modules = [
+            # LM decoder
+            "q_proj", "k_proj", "v_proj", "out_proj", "in_proj",
+            "w1", "w2", "w3",
+            # Vision encoder (SigLIP2) — attn + mlp
+            "qkv",          # packed QKV in vision attn
+            "fc1", "fc2",   # vision FFN + projector layers
+        ]
     elif "qwen" in model_name.lower():
         # LM decoder layers + vision encoder attention + merger projection
         target_modules = [
