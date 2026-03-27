@@ -268,16 +268,18 @@ def train_sft(
     if "lfm" in model_name.lower() or "liquid" in model_name.lower():
         target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "in_proj", "w1", "w2", "w3"]
     elif "qwen" in model_name.lower():
-        # LM decoder layers + vision encoder attention + merger
+        # LM decoder layers + vision encoder attention + merger projection
         target_modules = [
             # LM decoder
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
-            # Vision encoder — attn QKV projection
+            # Vision encoder — self-attention
             "qkv",
-            # Vision encoder — merger (projects vision 1152→LM 4096)
-            # Critical for encoding spatial position into LM embeddings
-            "merger",
+            "attn.proj",
+            # Vision encoder — FFN
+            "linear_fc1", "linear_fc2",
+            # This also catches merger.linear_fc1/fc2 and deepstack_merger_list.N.linear_fc1/fc2
+            # which are the critical vision→LM projection layers
         ]
     else:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
