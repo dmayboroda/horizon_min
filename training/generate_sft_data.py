@@ -89,6 +89,7 @@ def generate_one_sample(
     latency_frames: int,
     frame_skip: int,
     fixed_speed: bool,
+    single_duck: bool = False,
 ) -> dict | None:
     """Generate one SFT sample from a fresh match.
 
@@ -99,8 +100,14 @@ def generate_one_sample(
     round_number = 1 if fixed_speed else random.randint(1, 3)
     match = Match(round_number)
 
-    # Advance random frames so ducks enter the screen
-    advance = random.randint(10, 30)
+    # Remove duck_b for single duck mode
+    if single_duck and match.duck_b is not None:
+        match.duck_b.state = DuckState.ESCAPED
+        match.duck_b = None
+
+    # Advance many frames so ducks move away from edges toward center
+    # Wider range creates diverse positions across the screen
+    advance = random.randint(15, 80)
     match.advance_frames(advance)
 
     # Pick a flying visible duck
@@ -223,6 +230,7 @@ def generate_dataset(
     frame_skip: int = 6,
     fps: int = 30,
     fixed_speed: bool = False,
+    single_duck: bool = False,
     output_dir: str = "sft_dataset",
 ) -> None:
     latency_frames = int(latency_ms / 1000 * fps)
@@ -233,6 +241,7 @@ def generate_dataset(
     logger.info("  Latency: %dms = %d frames", latency_ms, latency_frames)
     logger.info("  Frame skip: %d", frame_skip)
     logger.info("  Fixed speed: %s (round=1 only)", fixed_speed)
+    logger.info("  Single duck: %s", single_duck)
 
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -247,7 +256,7 @@ def generate_dataset(
     while generated < num_samples and attempts < max_attempts:
         attempts += 1
 
-        sample = generate_one_sample(renderer, latency_frames, frame_skip, fixed_speed)
+        sample = generate_one_sample(renderer, latency_frames, frame_skip, fixed_speed, single_duck)
         if sample is None:
             continue
 
@@ -300,6 +309,8 @@ def main():
                         help="Single latency value in ms")
     parser.add_argument("--fixed-speed", action="store_true",
                         help="All ducks at round 1 speed (no speed increase)")
+    parser.add_argument("--single-duck", action="store_true",
+                        help="Only 1 duck per match (no ambiguity)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -310,6 +321,7 @@ def main():
         latency_ms=args.latency_ms,
         frame_skip=args.frame_skip,
         fixed_speed=args.fixed_speed,
+        single_duck=args.single_duck,
         output_dir=args.output,
     )
 
