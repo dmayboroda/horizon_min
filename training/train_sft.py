@@ -263,10 +263,22 @@ def train_sft(
     )
 
     # Detect LoRA targets based on model
+    # SFT needs vision encoder LoRA too — the LM alone can't learn to map
+    # vision features to precise coordinates without tuning the vision side.
     if "lfm" in model_name.lower() or "liquid" in model_name.lower():
         target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "in_proj", "w1", "w2", "w3"]
     elif "qwen" in model_name.lower():
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        # LM decoder layers + vision encoder attention + merger
+        target_modules = [
+            # LM decoder
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+            # Vision encoder — attn QKV projection
+            "qkv",
+            # Vision encoder — merger (projects vision 1152→LM 4096)
+            # Critical for encoding spatial position into LM embeddings
+            "merger",
+        ]
     else:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
