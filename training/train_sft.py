@@ -271,9 +271,11 @@ def train_sft(
             # LM decoder
             "q_proj", "k_proj", "v_proj", "out_proj", "in_proj",
             "w1", "w2", "w3",
-            # Vision encoder (SigLIP2) — attn + mlp
-            "qkv",          # packed QKV in vision attn
-            "fc1", "fc2",   # vision FFN + projector layers
+            # Vision encoder (SigLIP2) — attn already covered by q/k/v/out_proj
+            # Vision encoder — FFN
+            "fc1", "fc2",
+            # Vision-to-LM projector (multi_modal_projector.linear_1/linear_2)
+            "linear_1", "linear_2",
         ]
     elif "qwen" in model_name.lower():
         # LM decoder layers + vision encoder attention + merger projection
