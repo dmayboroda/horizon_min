@@ -26,6 +26,7 @@ lora:
   lora_alpha: 16
   lora_dropout: 0.0
   target_modules:
+    # LM decoder
     - q_proj
     - k_proj
     - v_proj
@@ -34,6 +35,12 @@ lora:
     - w1
     - w2
     - w3
+    # Vision encoder (SigLIP2) — FFN
+    - fc1
+    - fc2
+    # Vision-to-LM projector
+    - linear_1
+    - linear_2
   task_type: "CAUSAL_LM"
   bias: "none"
 
