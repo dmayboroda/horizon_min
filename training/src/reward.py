@@ -95,8 +95,13 @@ def compute_reward_detailed(
     else:
         bd.horizon_penalty = config.lambda_horizon_miss * horizon_ratio
 
-    # ---- proximity bonus (on misses, flying ducks only) ----
-    if not (hit_a or hit_b) and config.proximity_bonus > 0:
+    # ---- proximity bonus (distance to nearest duck hitbox center) ----
+    # Works for BOTH hits and misses. Closer to hitbox center = higher bonus.
+    # Hitbox center offset in normalized coords (half sprite size / screen size)
+    hbox_cx_offset = 0.05  # ~40px / 800px
+    hbox_cy_offset = 0.07  # ~35px / 500px
+
+    if config.proximity_bonus > 0:
         shot_pos = result.get("shot_pos")
         duck_a_pos = result.get("duck_a_pos")
         duck_b_pos = result.get("duck_b_pos")
@@ -106,9 +111,11 @@ def compute_reward_detailed(
         if shot_pos:
             distances = []
             if duck_a_pos and duck_a_state == "flying":
-                distances.append(_distance(shot_pos, duck_a_pos))
+                center_a = (duck_a_pos[0] + hbox_cx_offset, duck_a_pos[1] + hbox_cy_offset)
+                distances.append(_distance(shot_pos, center_a))
             if duck_b_pos and duck_b_state == "flying":
-                distances.append(_distance(shot_pos, duck_b_pos))
+                center_b = (duck_b_pos[0] + hbox_cx_offset, duck_b_pos[1] + hbox_cy_offset)
+                distances.append(_distance(shot_pos, center_b))
 
             if distances:
                 bd.min_distance = min(distances)
@@ -116,39 +123,5 @@ def compute_reward_detailed(
                     -config.proximity_decay * bd.min_distance
                 )
 
-    # ---- edge bonus (on hits, reward aiming away from screen center) ----
-    if (hit_a or hit_b) and config.edge_bonus > 0:
-        shot_pos = result.get("shot_pos")
-        if shot_pos:
-            center_dist = _distance(shot_pos, (0.5, 0.5))
-            bd.edge_bonus = config.edge_bonus * min(center_dist / 0.4, 1.0)
-
-    # ---- hitbox center bonus (on hits, reward precision toward duck center) ----
-    if (hit_a or hit_b) and config.hitbox_center_bonus > 0:
-        shot_pos = result.get("shot_pos")
-        duck_a_pos = result.get("duck_a_pos")
-        duck_b_pos = result.get("duck_b_pos")
-
-        if shot_pos:
-            # Hitbox center offset in normalized coords
-            # Uses sprite size as proxy (81x75) since hitbox is centered on sprite
-            hbox_cx_offset = 0.05  # ~40px / 800px (half hitbox width)
-            hbox_cy_offset = 0.07  # ~35px / 500px (half hitbox height)
-            # Max distance from center within hitbox (half diagonal in normalized coords)
-            max_dist = math.sqrt(hbox_cx_offset ** 2 + hbox_cy_offset ** 2)
-
-            distances_to_center = []
-            if hit_a and duck_a_pos:
-                duck_center = (duck_a_pos[0] + hbox_cx_offset, duck_a_pos[1] + hbox_cy_offset)
-                distances_to_center.append(_distance(shot_pos, duck_center))
-            if hit_b and duck_b_pos:
-                duck_center = (duck_b_pos[0] + hbox_cx_offset, duck_b_pos[1] + hbox_cy_offset)
-                distances_to_center.append(_distance(shot_pos, duck_center))
-
-            if distances_to_center:
-                min_dist_to_center = min(distances_to_center)
-                # Linear: 0 distance = full bonus, max_dist = 0 bonus
-                bd.hitbox_center_bonus = config.hitbox_center_bonus * max(0.0, 1.0 - min_dist_to_center / max_dist)
-
-    bd.total = bd.base - bd.horizon_penalty + bd.proximity_bonus + bd.edge_bonus + bd.hitbox_center_bonus
+    bd.total = bd.base - bd.horizon_penalty + bd.proximity_bonus
     return bd

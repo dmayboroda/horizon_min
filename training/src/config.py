@@ -209,9 +209,14 @@ class RewardConfig:
 
     # Format reward (structured output)
     format_weight: float = 0.3
+    format_decay_steps: int = 0  # 0 = no decay; steps over which format_weight decays to 0
 
     # Accuracy reward (did model parse / predict correctly)
     accuracy_weight: float = 1.0
+
+    # Reward normalization mode: "group" (default), "per_component", "moving_avg"
+    reward_normalization: str = "group"
+    moving_avg_alpha: float = 0.01  # EMA smoothing factor for moving average baseline
 
     # Hotspot penalty (anti-exploit)
     hotspot_enabled: bool = True  # set to false to disable hotspot penalty entirely

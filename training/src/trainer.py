@@ -135,7 +135,7 @@ class DuckHuntGRPOTrainer:
         # Checkpoint tracking
         self.global_step = 0
         self.best_eval_hit_rate = -1.0
-        self._reward_baseline = 0.0  # running average for advantage when std=0
+        self._reward_baseline = 0.0  # EMA reward baseline for moving_avg normalization
         self._saved_checkpoints: list[Path] = []
         self._last_grad_norm = 0.0
         self._total_hits = 0
@@ -277,6 +277,14 @@ class DuckHuntGRPOTrainer:
             if "lora" in name.lower():
                 param.requires_grad_(True)
         self._lora_frozen = False
+
+    def _get_format_weight(self, step: int) -> float:
+        """Return format_weight with optional decay."""
+        base = self.cfg.reward.format_weight
+        decay_steps = self.cfg.reward.format_decay_steps
+        if decay_steps <= 0 or base <= 0:
+            return base
+        return base * max(0.0, 1.0 - step / decay_steps)
 
     def _get_grad_accum(self, step: int) -> int:
         """Return gradient accumulation steps for the current step."""
@@ -629,16 +637,56 @@ class DuckHuntGRPOTrainer:
 
         rewards_t = torch.tensor(batch["rewards"], dtype=torch.float32)
         prompt_len = batch["prompt_len"]
+        norm_mode = self.cfg.reward.reward_normalization
 
-        # --- 1. Advantages (group-normalised) ---
+        # --- 1. Advantages ---
         mean_r = rewards_t.mean()
         std_r = rewards_t.std()
-        if std_r < 1e-8:
-            # All rewards identical — no gradient signal possible.
-            # Return zeros to avoid NaN and prevent spurious updates.
-            advantages = torch.zeros_like(rewards_t)
+
+        if norm_mode == "moving_avg":
+            # Moving average baseline: compare rewards against EMA of recent performance
+            alpha = self.cfg.reward.moving_avg_alpha
+            self._reward_baseline = (1 - alpha) * self._reward_baseline + alpha * mean_r.item()
+            centered = rewards_t - self._reward_baseline
+            std_centered = centered.std()
+            if std_centered < 1e-8:
+                advantages = torch.zeros_like(rewards_t)
+            else:
+                advantages = centered / (std_centered + 1e-8)
+
+        elif norm_mode == "per_component":
+            # Per-component normalization: normalize accuracy and format separately
+            # then combine. Prevents format reward from dominating.
+            accuracy_rewards = torch.tensor(
+                [bd.total for bd in batch.get("reward_breakdowns", [])],
+                dtype=torch.float32,
+            ) if "reward_breakdowns" in batch else rewards_t
+
+            format_rewards = torch.tensor(
+                batch.get("format_rewards", [0.0] * G),
+                dtype=torch.float32,
+            )
+
+            def _norm(t: torch.Tensor) -> torch.Tensor:
+                s = t.std()
+                return (t - t.mean()) / (s + 1e-8) if s > 1e-8 else torch.zeros_like(t)
+
+            acc_weight = self.cfg.reward.accuracy_weight
+            fmt_weight = self._get_format_weight(batch.get("step", 0))
+            total_weight = acc_weight + fmt_weight + 1e-8
+
+            advantages = (
+                acc_weight * _norm(accuracy_rewards)
+                + fmt_weight * _norm(format_rewards)
+            ) / total_weight
+
         else:
-            advantages = (rewards_t - mean_r) / (std_r + 1e-8)
+            # Default: group normalization (standard GRPO)
+            if std_r < 1e-8:
+                advantages = torch.zeros_like(rewards_t)
+            else:
+                advantages = (rewards_t - mean_r) / (std_r + 1e-8)
+
         advantages = advantages.to(self.device)
 
         total_loss = torch.tensor(0.0, device=self.device)
