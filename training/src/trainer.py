@@ -1009,6 +1009,24 @@ class DuckHuntGRPOTrainer:
         if not self._wandb_active or wandb.run is None:
             return
 
+        try:
+            self._log_batch_to_wandb_inner(
+                frames, completions, rewards, actions, hit_flags,
+                shot_frame, reward_breakdowns,
+            )
+        except OSError as e:
+            logger.warning("W&B batch logging failed (I/O error), skipping: %s", e)
+
+    def _log_batch_to_wandb_inner(
+        self,
+        frames: list,
+        completions: list[str],
+        rewards: list[float],
+        actions: list | None = None,
+        hit_flags: list[bool] | None = None,
+        shot_frame: Image.Image | None = None,
+        reward_breakdowns: list | None = None,
+    ) -> None:
         log_dict: dict = {}
 
         # Log raw observation frames (what the model saw)
