@@ -1120,7 +1120,10 @@ class DuckHuntGRPOTrainer:
             log_dict["reward/n_invalid"] = outcomes.count("invalid")
             log_dict["reward/n_shoot_dead"] = outcomes.count("shoot_dead")
 
-        wandb.log(log_dict)
+        try:
+            wandb.log(log_dict)
+        except OSError as e:
+            logger.warning("W&B logging failed (I/O error), skipping: %s", e)
 
     def _log_metrics(self, step: int, metrics: dict) -> None:
         lr = self.scheduler.get_last_lr()[0]
@@ -1157,7 +1160,10 @@ class DuckHuntGRPOTrainer:
                 "train/lora_frozen": int(self._lora_frozen),
                 "train/grad_accum": self._get_grad_accum(step),
             }
-            wandb.log(log_dict)
+            try:
+                wandb.log(log_dict)
+            except OSError as e:
+                logger.warning("W&B metrics log failed, skipping: %s", e)
 
     def _log_eval_to_wandb(self, eval_metrics: dict, step: int) -> None:
         """Log rich evaluation data to W&B: metrics, histogram, table, chart."""
@@ -1223,7 +1229,10 @@ class DuckHuntGRPOTrainer:
 
         log_dict["eval/best_hit_rate"] = self.best_eval_hit_rate
 
-        wandb.log(log_dict)
+        try:
+            wandb.log(log_dict)
+        except OSError as e:
+            logger.warning("W&B eval log failed, skipping: %s", e)
 
     # ------------------------------------------------------------------
     #  Checkpointing (9.1)
