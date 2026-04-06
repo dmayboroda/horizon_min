@@ -108,15 +108,50 @@ def load_sft_dataset(dataset_dir: str) -> list[dict]:
     return records
 
 
+def _mask_non_value_tokens(
+    full_ids: torch.Tensor,
+    prompt_len: int,
+    completion_text: str,
+    processor,
+) -> torch.Tensor:
+    """Build labels that ONLY include digit/decimal tokens from the completion.
+
+    Everything else is masked with -100 (no gradient):
+    - All prompt tokens
+    - All structural completion tokens (<|tool_call_start|>, [locate(, x1=, ...)
+    - Only digit tokens like '0', '0.55', '.', '5' get gradient
+
+    This forces the model to learn the COORDINATES, not the format.
+    """
+    labels = full_ids.clone()
+    labels[:prompt_len] = -100  # mask prompt
+
+    # Mask everything in the completion by default
+    labels[prompt_len:] = -100
+
+    # Decode each completion token individually to find which ones are values
+    completion_ids = full_ids[prompt_len:]
+    for i, tok_id in enumerate(completion_ids.tolist()):
+        tok_text = processor.tokenizer.decode([tok_id], skip_special_tokens=False)
+        # A token is a "value" if it contains digits or decimal points
+        # and doesn't contain letters (so 'x1' is not a value, but '0.55' is)
+        if any(c.isdigit() for c in tok_text) and not any(c.isalpha() for c in tok_text):
+            labels[prompt_len + i] = tok_id
+
+    return labels
+
+
 def build_training_sample(
     record: dict,
     processor,
     device: torch.device,
+    value_only_loss: bool = True,
 ) -> dict | None:
     """Build tokenized input/labels for one SFT sample.
 
     Returns dict with 'input_ids', 'attention_mask', 'labels'.
-    Labels = -100 for prompt tokens, real IDs for completion tokens.
+    If value_only_loss=True, only digit/decimal tokens contribute to loss.
+    Otherwise standard completion-only loss.
     """
     # Load images
     images = []
@@ -168,9 +203,19 @@ def build_training_sample(
         full_ids = full_inputs["input_ids"][0]
         prompt_len = prompt_inputs["input_ids"].shape[1]
 
-        # Labels: -100 for prompt, real IDs for completion
-        labels = full_ids.clone()
-        labels[:prompt_len] = -100
+        # Build labels
+        if value_only_loss:
+            # Only digit/decimal tokens in completion get gradient
+            labels = _mask_non_value_tokens(
+                full_ids, prompt_len, record["completion"], processor,
+            )
+        else:
+            # Standard completion-only: all completion tokens get gradient
+            labels = full_ids.clone()
+            labels[:prompt_len] = -100
+
+        # Count how many tokens have actual gradient (for diagnostic)
+        n_active = (labels != -100).sum().item()
 
         return {
             "input_ids": full_ids.unsqueeze(0).to(device),
@@ -178,6 +223,7 @@ def build_training_sample(
             "labels": labels.unsqueeze(0).to(device),
             "prompt_len": prompt_len,
             "comp_len": len(full_ids) - prompt_len,
+            "n_active_tokens": n_active,
         }
     except Exception as e:
         logger.warning("Failed to build sample %s: %s", record.get("id", "?"), e)
@@ -202,6 +248,7 @@ def train_sft(
     save_steps: int = 200,
     wandb_project: str = "duckhunt-sft",
     wandb_run_name: str | None = None,
+    value_only_loss: bool = True,
     seed: int = 42,
 ) -> None:
     """Run SFT training with optional distributed support."""
@@ -341,6 +388,16 @@ def train_sft(
         logger.info("  LR: %s, LoRA r=%d alpha=%d", learning_rate, lora_r, lora_alpha)
         logger.info("  Grad accum: %d", grad_accum)
         logger.info("  Distributed: %s (%d GPUs)", distributed, world_size)
+        logger.info("  Loss mode: %s", "value-only (digits only)" if value_only_loss else "full completion")
+
+        # Diagnostic: check how many tokens are active in a sample
+        if records:
+            sample = build_training_sample(records[0], processor, device, value_only_loss=value_only_loss)
+            if sample:
+                logger.info(
+                    "  Sample diagnostic: %d active tokens out of %d completion tokens",
+                    sample["n_active_tokens"], sample["comp_len"],
+                )
 
     # W&B — main process only
     wandb_active = False
@@ -378,7 +435,7 @@ def train_sft(
         epoch_samples = 0
 
         for i, record in enumerate(records):
-            sample = build_training_sample(record, processor, device)
+            sample = build_training_sample(record, processor, device, value_only_loss=value_only_loss)
             if sample is None:
                 continue
 
@@ -463,7 +520,7 @@ def train_sft(
 
             with torch.no_grad():
                 for vi, val_record in enumerate(val_records):
-                    val_sample = build_training_sample(val_record, processor, device)
+                    val_sample = build_training_sample(val_record, processor, device, value_only_loss=value_only_loss)
                     if val_sample is None:
                         continue
 
@@ -589,6 +646,8 @@ def main():
     parser.add_argument("--save-steps", type=int, default=200)
     parser.add_argument("--wandb-project", type=str, default="duckhunt-sft")
     parser.add_argument("--wandb-name", type=str, default=None)
+    parser.add_argument("--full-completion-loss", action="store_true",
+                        help="Train on all completion tokens (default: only digit/value tokens)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -604,6 +663,7 @@ def main():
         save_steps=args.save_steps,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_name,
+        value_only_loss=not args.full_completion_loss,
         seed=args.seed,
     )
 
