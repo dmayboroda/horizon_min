@@ -108,50 +108,46 @@ def load_sft_dataset(dataset_dir: str) -> list[dict]:
     return records
 
 
-def _mask_non_value_tokens(
+def _build_token_weights(
     full_ids: torch.Tensor,
     prompt_len: int,
-    completion_text: str,
     processor,
+    value_weight: float = 5.0,
 ) -> torch.Tensor:
-    """Build labels that ONLY include digit/decimal tokens from the completion.
+    """Build per-token loss weights.
 
-    Everything else is masked with -100 (no gradient):
-    - All prompt tokens
-    - All structural completion tokens (<|tool_call_start|>, [locate(, x1=, ...)
-    - Only digit tokens like '0', '0.55', '.', '5' get gradient
+    - Prompt tokens: weight 0 (effectively masked via labels=-100)
+    - Structural completion tokens (tool_call_start, [locate(, x1=, ...): weight 1.0
+    - Value tokens (digits): weight `value_weight` (amplified)
 
-    This forces the model to learn the COORDINATES, not the format.
+    This keeps the model producing structural tokens correctly while
+    focusing learning capacity on the coordinate values.
     """
-    labels = full_ids.clone()
-    labels[:prompt_len] = -100  # mask prompt
+    weights = torch.zeros(full_ids.shape, dtype=torch.float32)
+    # All completion tokens get weight 1.0 by default
+    weights[prompt_len:] = 1.0
 
-    # Mask everything in the completion by default
-    labels[prompt_len:] = -100
-
-    # Decode each completion token individually to find which ones are values
+    # Value tokens get higher weight
     completion_ids = full_ids[prompt_len:]
     for i, tok_id in enumerate(completion_ids.tolist()):
         tok_text = processor.tokenizer.decode([tok_id], skip_special_tokens=False)
-        # A token is a "value" if it contains digits or decimal points
-        # and doesn't contain letters (so 'x1' is not a value, but '0.55' is)
         if any(c.isdigit() for c in tok_text) and not any(c.isalpha() for c in tok_text):
-            labels[prompt_len + i] = tok_id
+            weights[prompt_len + i] = value_weight
 
-    return labels
+    return weights
 
 
 def build_training_sample(
     record: dict,
     processor,
     device: torch.device,
-    value_only_loss: bool = True,
+    value_weight: float = 5.0,
 ) -> dict | None:
     """Build tokenized input/labels for one SFT sample.
 
-    Returns dict with 'input_ids', 'attention_mask', 'labels'.
-    If value_only_loss=True, only digit/decimal tokens contribute to loss.
-    Otherwise standard completion-only loss.
+    Returns dict with 'input_ids', 'attention_mask', 'labels', 'token_weights'.
+    Prompt tokens are masked (-100). All completion tokens contribute to loss,
+    but value tokens are weighted higher (default 5x).
     """
     # Load images
     images = []
@@ -203,27 +199,27 @@ def build_training_sample(
         full_ids = full_inputs["input_ids"][0]
         prompt_len = prompt_inputs["input_ids"].shape[1]
 
-        # Build labels
-        if value_only_loss:
-            # Only digit/decimal tokens in completion get gradient
-            labels = _mask_non_value_tokens(
-                full_ids, prompt_len, record["completion"], processor,
-            )
-        else:
-            # Standard completion-only: all completion tokens get gradient
-            labels = full_ids.clone()
-            labels[:prompt_len] = -100
+        # Standard completion-only labels: mask prompt, all completion tokens active
+        labels = full_ids.clone()
+        labels[:prompt_len] = -100
 
-        # Count how many tokens have actual gradient (for diagnostic)
-        n_active = (labels != -100).sum().item()
+        # Per-token weights: structural tokens = 1.0, value tokens = value_weight
+        token_weights = _build_token_weights(
+            full_ids, prompt_len, processor, value_weight=value_weight,
+        )
+
+        n_value_tokens = int((token_weights == value_weight).sum().item())
+        n_struct_tokens = int((token_weights == 1.0).sum().item())
 
         return {
             "input_ids": full_ids.unsqueeze(0).to(device),
             "attention_mask": full_inputs["attention_mask"].to(device),
             "labels": labels.unsqueeze(0).to(device),
+            "token_weights": token_weights.unsqueeze(0).to(device),
             "prompt_len": prompt_len,
             "comp_len": len(full_ids) - prompt_len,
-            "n_active_tokens": n_active,
+            "n_value_tokens": n_value_tokens,
+            "n_struct_tokens": n_struct_tokens,
         }
     except Exception as e:
         logger.warning("Failed to build sample %s: %s", record.get("id", "?"), e)
@@ -248,7 +244,7 @@ def train_sft(
     save_steps: int = 200,
     wandb_project: str = "duckhunt-sft",
     wandb_run_name: str | None = None,
-    value_only_loss: bool = True,
+    value_weight: float = 5.0,
     seed: int = 42,
 ) -> None:
     """Run SFT training with optional distributed support."""
@@ -388,15 +384,15 @@ def train_sft(
         logger.info("  LR: %s, LoRA r=%d alpha=%d", learning_rate, lora_r, lora_alpha)
         logger.info("  Grad accum: %d", grad_accum)
         logger.info("  Distributed: %s (%d GPUs)", distributed, world_size)
-        logger.info("  Loss mode: %s", "value-only (digits only)" if value_only_loss else "full completion")
+        logger.info("  Value weight: %.1f (structural=1.0)", value_weight)
 
-        # Diagnostic: check how many tokens are active in a sample
+        # Diagnostic: check token distribution in a sample
         if records:
-            sample = build_training_sample(records[0], processor, device, value_only_loss=value_only_loss)
+            sample = build_training_sample(records[0], processor, device, value_weight=value_weight)
             if sample:
                 logger.info(
-                    "  Sample diagnostic: %d active tokens out of %d completion tokens",
-                    sample["n_active_tokens"], sample["comp_len"],
+                    "  Sample diagnostic: %d value tokens + %d structural tokens = %d total completion tokens",
+                    sample["n_value_tokens"], sample["n_struct_tokens"], sample["comp_len"],
                 )
 
     # W&B — main process only
@@ -435,25 +431,44 @@ def train_sft(
         epoch_samples = 0
 
         for i, record in enumerate(records):
-            sample = build_training_sample(record, processor, device, value_only_loss=value_only_loss)
+            sample = build_training_sample(record, processor, device, value_weight=value_weight)
             if sample is None:
                 continue
 
-            # Forward pass
+            # Forward pass (don't pass labels — we compute loss manually with weights)
             outputs = model(
                 input_ids=sample["input_ids"],
                 attention_mask=sample["attention_mask"],
-                labels=sample["labels"],
             )
-            loss = outputs.loss / grad_accum
+            logits = outputs.logits  # (1, T, V)
+
+            # Shift for causal LM: predict token t+1 from logits[t]
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = sample["labels"][:, 1:].contiguous()
+            shift_weights = sample["token_weights"][:, 1:].contiguous()
+
+            # Per-token cross entropy
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            per_token_loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            )  # (B*T,)
+            per_token_loss = per_token_loss.view(shift_labels.shape)  # (B, T)
+
+            # Apply weights (weight is 0 for prompt, 1 for structural, value_weight for values)
+            weighted_loss = per_token_loss * shift_weights
+            # Normalize by sum of weights (so loss scale is consistent)
+            total_weight = shift_weights.sum().clamp(min=1.0)
+            loss_raw = weighted_loss.sum() / total_weight
+            loss = loss_raw / grad_accum
 
             if distributed:
                 accelerator.backward(loss)
             else:
                 loss.backward()
 
-            running_loss += outputs.loss.item()
-            epoch_loss += outputs.loss.item()
+            running_loss += loss_raw.item()
+            epoch_loss += loss_raw.item()
             epoch_samples += 1
             samples_processed += 1
 
@@ -520,16 +535,24 @@ def train_sft(
 
             with torch.no_grad():
                 for vi, val_record in enumerate(val_records):
-                    val_sample = build_training_sample(val_record, processor, device, value_only_loss=value_only_loss)
+                    val_sample = build_training_sample(val_record, processor, device, value_weight=value_weight)
                     if val_sample is None:
                         continue
 
                     val_out = gen_model(
                         input_ids=val_sample["input_ids"],
                         attention_mask=val_sample["attention_mask"],
-                        labels=val_sample["labels"],
                     )
-                    val_loss += val_out.loss.item()
+                    vlogits = val_out.logits[:, :-1, :].contiguous()
+                    vlabels = val_sample["labels"][:, 1:].contiguous()
+                    vweights = val_sample["token_weights"][:, 1:].contiguous()
+                    vfct = torch.nn.CrossEntropyLoss(reduction="none")
+                    vptl = vfct(
+                        vlogits.view(-1, vlogits.size(-1)),
+                        vlabels.view(-1),
+                    ).view(vlabels.shape)
+                    vl = (vptl * vweights).sum() / vweights.sum().clamp(min=1.0)
+                    val_loss += vl.item()
                     val_samples += 1
 
                     # Visual logging for a few samples
@@ -646,8 +669,8 @@ def main():
     parser.add_argument("--save-steps", type=int, default=200)
     parser.add_argument("--wandb-project", type=str, default="duckhunt-sft")
     parser.add_argument("--wandb-name", type=str, default=None)
-    parser.add_argument("--full-completion-loss", action="store_true",
-                        help="Train on all completion tokens (default: only digit/value tokens)")
+    parser.add_argument("--value-weight", type=float, default=5.0,
+                        help="Loss weight for value (digit) tokens vs structural tokens (=1.0)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -663,7 +686,7 @@ def main():
         save_steps=args.save_steps,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_name,
-        value_only_loss=not args.full_completion_loss,
+        value_weight=args.value_weight,
         seed=args.seed,
     )
 
