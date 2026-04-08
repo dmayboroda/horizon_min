@@ -50,14 +50,14 @@ grpo:
   temperature: 1.0
   top_p: 0.95
   top_k: 0
-  beta: 0.0                                # no KL anchor — don't pull back to chat model
+  beta: 0.01                               # small KL anchor to reference model
   num_iterations: 1
   epsilon: 0.2
   loss_type: "grpo"
   scale_rewards: "group"
-  entropy_coeff: 0.0                       # no entropy bonus — temperature handles exploration
-  entropy_floor: 0.0
-  entropy_floor_coeff: 0.0
+  entropy_coeff: 0.02
+  entropy_floor: 0.5                       # emergency brake — penalty if entropy drops below
+  entropy_floor_coeff: 1.0
   # Curriculum: phase 1 = learn (x,y), phase 2 = learn horizon
   curriculum_phase2_step: 15000
   phase1_max_completion_length: 30
@@ -73,11 +73,11 @@ training:
   max_steps: -1
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 8
-  learning_rate: 2.0e-5
-  warmup_ratio: 0.03
+  learning_rate: 5.0e-6                    # lowered for LoRA stability
+  warmup_ratio: 0.05
   weight_decay: 0.01
   lr_scheduler_type: "cosine"
-  max_grad_norm: 1.0
+  max_grad_norm: 0.3                       # tighter clip to prevent loss spikes
   bf16: true
   fp16: false
   logging_steps: 1
@@ -111,6 +111,7 @@ reward:
   skip_no_target: true                     # skip impossible shots (ducks escaped)
   format_weight: 0.3                       # tool call correctness reward
   accuracy_weight: 1.0
+  reward_normalization: "group"            # group / moving_avg / per_component
 
 logging:
   wandb_project: "duckhunt-grpo"

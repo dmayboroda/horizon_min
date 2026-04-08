@@ -711,8 +711,11 @@ reward:
   skip_invalid_generations: true   # drop unparseable outputs from GRPO
   skip_no_target: true             # drop impossible shots (ducks escaped) from GRPO
   format_weight: 0.0         # 0 when model already learned tool calls
+  format_decay_steps: 0      # 0 = no decay; N = linearly decay to 0 over N steps
   accuracy_weight: 1.0       # weight for accuracy reward in total
   max_horizon: 30            # max horizon for penalty normalization
+  reward_normalization: "group"   # group (default) / moving_avg / per_component
+  moving_avg_alpha: 0.01     # EMA smoothing for moving_avg mode
 
 grpo:
   curriculum_phase2_step: 15000    # 0 = disabled; step to unlock horizon
@@ -721,8 +724,14 @@ grpo:
   stabilization_steps: 500         # 0 = disabled; boosted grad_accum duration
   stabilization_grad_accum: 8      # grad_accum during stabilization
   lora_freeze_steps: 50            # 0 = disabled; freeze LoRA for N steps
+  beta: 0.01                       # KL anchor (k3 estimator)
+  entropy_coeff: 0.02
+  entropy_floor: 0.5               # emergency brake on entropy collapse
+  entropy_floor_coeff: 1.0
 
 training:
+  learning_rate: 5.0e-6            # safer than 2e-5 for LoRA on VLMs
+  max_grad_norm: 0.3               # tighter than 1.0 prevents loss spikes
   warmup_ratio: 0.10               # LR warmup fraction of total optimizer steps
 ```
 
@@ -755,3 +764,8 @@ training:
 | Multi-GPU: `device_map="auto"` error with DDP | device_map uses model parallelism, DDP needs full model per GPU | Auto-handled: trainer disables device_map when `WORLD_SIZE > 1` |
 | Multi-GPU: `model.generate()` fails | DDP wrapper doesn't support generate | Auto-handled: trainer uses `_unwrap_model().generate()` |
 | Multi-GPU: duplicate W&B logs | All ranks trying to log | Auto-handled: only rank 0 logs to W&B and saves checkpoints |
+| Loss spikes / gradient blow-ups | LoRA LR too high or grad clip too loose | Lower `learning_rate` to 5e-6, set `max_grad_norm=0.3` |
+| Advantages of 10⁶+ in W&B | std≈0 → division blow-up | Auto-handled: std floor 0.1 + clamp ±5 in trainer |
+| Training "freezes" with zero advantages | All gens got same reward, GRPO has no signal | Auto-handled: trainer skips backward when std<1e-6 |
+| Model anti-anchored from reference (KL goes negative) | Wrong KL formula | Auto-handled: replaced with Schulman k3 estimator (always ≥ 0) |
+| Entropy crashes to 0 / model collapses | No entropy floor | Set `entropy_floor: 0.5`, `entropy_floor_coeff: 1.0` |

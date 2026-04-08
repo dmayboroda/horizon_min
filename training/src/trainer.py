@@ -350,11 +350,17 @@ class DuckHuntGRPOTrainer:
 
             # 3. Backprop (with grad accumulation)
             grad_accum = self._get_grad_accum(step)
-            scaled_loss = loss / grad_accum
-            if self._distributed:
-                self.accelerator.backward(scaled_loss)
+
+            if loss is None:
+                # No signal in this group (all rewards equal). Skip update.
+                if self._is_main_process and step % 50 == 0:
+                    logger.info("Step %d: skipped (no signal, std=0)", step)
             else:
-                scaled_loss.backward()
+                scaled_loss = loss / grad_accum
+                if self._distributed:
+                    self.accelerator.backward(scaled_loss)
+                else:
+                    scaled_loss.backward()
 
             if (step + 1) % grad_accum == 0:
                 if self._lora_frozen:
@@ -631,7 +637,7 @@ class DuckHuntGRPOTrainer:
     # ------------------------------------------------------------------
     #  GRPO loss computation
     # ------------------------------------------------------------------
-    def _compute_grpo_loss(self, batch: dict) -> tuple[torch.Tensor, dict]:
+    def _compute_grpo_loss(self, batch: dict) -> tuple[torch.Tensor | None, dict]:
         grpo = self.cfg.grpo
         G = len(batch["rewards"])
 
@@ -643,20 +649,36 @@ class DuckHuntGRPOTrainer:
         mean_r = rewards_t.mean()
         std_r = rewards_t.std()
 
+        # Skip update entirely if no signal in this group
+        if std_r < 1e-6:
+            metrics = {
+                "loss": 0.0,
+                "mean_reward": mean_r.item(),
+                "std_reward": std_r.item(),
+                "mean_kl": 0.0,
+                "mean_entropy": 0.0,
+                "entropy_floor_penalty": 0.0,
+                "advantages_mean": 0.0,
+                "advantages_std": 0.0,
+                "advantages_max": 0.0,
+                "advantages_min": 0.0,
+                "skipped": True,
+            }
+            return None, metrics
+
+        # Bounded normalization with std floor and clamp to prevent blow-up
+        STD_FLOOR = 0.1
+        ADV_CLAMP = 5.0
+
         if norm_mode == "moving_avg":
-            # Moving average baseline: compare rewards against EMA of recent performance
             alpha = self.cfg.reward.moving_avg_alpha
             self._reward_baseline = (1 - alpha) * self._reward_baseline + alpha * mean_r.item()
             centered = rewards_t - self._reward_baseline
-            std_centered = centered.std()
-            if std_centered < 1e-8:
-                advantages = torch.zeros_like(rewards_t)
-            else:
-                advantages = centered / (std_centered + 1e-8)
+            # Use the larger of group std and centered std, with a floor
+            std_used = max(centered.std().item(), std_r.item(), STD_FLOOR)
+            advantages = (centered / std_used).clamp(-ADV_CLAMP, ADV_CLAMP)
 
         elif norm_mode == "per_component":
-            # Per-component normalization: normalize accuracy and format separately
-            # then combine. Prevents format reward from dominating.
             accuracy_rewards = torch.tensor(
                 [bd.total for bd in batch.get("reward_breakdowns", [])],
                 dtype=torch.float32,
@@ -668,8 +690,8 @@ class DuckHuntGRPOTrainer:
             )
 
             def _norm(t: torch.Tensor) -> torch.Tensor:
-                s = t.std()
-                return (t - t.mean()) / (s + 1e-8) if s > 1e-8 else torch.zeros_like(t)
+                s = max(t.std().item(), STD_FLOOR)
+                return ((t - t.mean()) / s).clamp(-ADV_CLAMP, ADV_CLAMP)
 
             acc_weight = self.cfg.reward.accuracy_weight
             fmt_weight = self._get_format_weight(batch.get("step", 0))
@@ -681,11 +703,9 @@ class DuckHuntGRPOTrainer:
             ) / total_weight
 
         else:
-            # Default: group normalization (standard GRPO)
-            if std_r < 1e-8:
-                advantages = torch.zeros_like(rewards_t)
-            else:
-                advantages = (rewards_t - mean_r) / (std_r + 1e-8)
+            # Default: group normalization with std floor + clamp
+            std_used = max(std_r.item(), STD_FLOOR)
+            advantages = ((rewards_t - mean_r) / std_used).clamp(-ADV_CLAMP, ADV_CLAMP)
 
         advantages = advantages.to(self.device)
 
@@ -728,20 +748,15 @@ class DuckHuntGRPOTrainer:
             else:
                 ref_log_probs = log_probs.detach()
 
-            # --- 4. Ratio + clipped surrogate ---
-            # For the first iteration (num_iterations=1), old_log_probs == log_probs
-            # so ratio ≈ 1; the gradient still flows through log_probs.
-            ratio = torch.exp(log_probs - log_probs.detach())
+            # --- 4. Policy loss (REINFORCE form, num_iterations=1) ---
+            # With num_iterations=1, PPO clipping is dead (ratio=1 always).
+            # Use direct REINFORCE: -log_prob * advantage.
             adv = advantages[i]
+            policy_loss = -(log_probs * adv).mean()
 
-            surr1 = ratio * adv
-            surr2 = torch.clamp(
-                ratio, 1.0 - grpo.epsilon, 1.0 + grpo.epsilon
-            ) * adv
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            # --- 5. KL penalty ---
-            kl = (log_probs - ref_log_probs).mean()
+            # --- 5. KL penalty (Schulman k3 estimator, always ≥ 0) ---
+            diff = ref_log_probs - log_probs
+            kl = (diff.exp() - 1 - diff).mean()
             total_kl += kl.item()
 
             # --- 6. Entropy bonus (subtract to maximize entropy) ---

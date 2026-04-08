@@ -1,6 +1,72 @@
-# Experimental Reward Features
+# Experimental Reward & Stability Features
 
 These features are implemented but experimental. Use them via CLI overrides.
+
+---
+
+## 0. Stability Hardening (always-on, automatic)
+
+The trainer has bounds and safeguards to prevent training collapse:
+
+### Std floor + advantage clamp
+
+```python
+STD_FLOOR = 0.1     # never normalize by tiny std
+ADV_CLAMP = 5.0     # advantages clamped to [-5, +5]
+
+advantages = ((rewards - mean) / max(std, STD_FLOOR)).clamp(-ADV_CLAMP, ADV_CLAMP)
+```
+
+**Why:** prevents 10⁷ advantage explosion when std ≈ 0. The previous `+1e-8` floor allowed advantages of ~1e7 when all rewards were nearly identical, causing massive gradient blow-ups.
+
+### Skip update on zero signal
+
+```python
+if std_r < 1e-6:
+    return None  # caller skips backward
+```
+
+When all G generations get the same reward (no signal), the trainer **skips the optimizer update entirely** instead of zeroing advantages. This prevents the "permanent freeze" failure mode where zero-advantage updates accumulate noise.
+
+The training loop checks for `loss is None` and skips backward + optimizer step.
+
+### Schulman k3 KL estimator
+
+The previous KL formula `(log_probs - ref_log_probs).mean()` is the **mean log-ratio**, which can be negative and isn't actually KL divergence.
+
+Replaced with the **k3 estimator** (Schulman):
+```python
+diff = ref_log_probs - log_probs
+kl = (diff.exp() - 1 - diff).mean()   # always ≥ 0, low variance
+```
+
+**Why:** the old formula could produce negative "KL" values that anti-anchored the model (pushed it AWAY from the reference). The k3 estimator is always ≥ 0 and a proper KL approximation.
+
+### REINFORCE policy loss (num_iterations=1)
+
+With `num_iterations=1`, PPO clipping is dead — the ratio `exp(log_probs - log_probs.detach())` is always 1. The previous code computed a meaningless clipped surrogate.
+
+Replaced with direct REINFORCE:
+```python
+policy_loss = -(log_probs * advantage).mean()
+```
+
+**Why:** cleaner, removes dead code path, behaves identically when `num_iterations=1`.
+
+### Recommended training stability config
+
+```yaml
+training:
+  learning_rate: 5.0e-6      # lower than 2e-5 — safer for LoRA on VLMs
+  max_grad_norm: 0.3         # tighter than 1.0 — prevents loss spikes
+  warmup_ratio: 0.05
+
+grpo:
+  beta: 0.01                 # small KL anchor (k3 estimator)
+  entropy_coeff: 0.02
+  entropy_floor: 0.5         # emergency brake
+  entropy_floor_coeff: 1.0
+```
 
 ---
 
@@ -83,11 +149,14 @@ advantages = (rewards - mean(rewards)) / std(rewards)
 
 ### Mode: `moving_avg`
 
+⚠️ **Use with caution** — caused training collapse in early experiments. Now bounded with std floor + clamp, but `group` is the safer default.
+
 Compare rewards against an exponential moving average (EMA) of recent performance.
 
 ```
 baseline = (1 - α) × baseline + α × mean(current_rewards)
-advantages = (rewards - baseline) / std(rewards - baseline)
+std_used = max(centered.std(), group.std(), 0.1)   # std floor
+advantages = ((rewards - baseline) / std_used).clamp(-5, 5)
 ```
 
 **How it works:**
@@ -110,6 +179,8 @@ reward:
 | 0.001 | ~1000 steps | Very stable, slow to adapt |
 
 **When to use:** When hit rate plateaus at a fixed level. The moving average creates pressure to keep improving.
+
+**Failure mode it had before bounds were added:** when baseline drifted close to current rewards, `centered.std()` could approach zero, producing massive advantages (10⁷+) and exploding gradients. The std floor (0.1) and clamp (±5) prevent this.
 
 ### Mode: `per_component`
 
@@ -198,7 +269,11 @@ accelerate launch --num_processes=2 --mixed_precision=bf16 \
 
 | Feature | Implemented | Tested | Notes |
 |---------|-------------|--------|-------|
+| Std floor + advantage clamp | Yes | Yes | Always on, prevents 10⁷ blow-ups |
+| Skip update on zero signal | Yes | Yes | Prevents permanent freeze |
+| Schulman k3 KL estimator | Yes | Yes | Replaces incorrect mean log-ratio |
+| REINFORCE policy loss | Yes | Yes | Cleaner with num_iterations=1 |
 | Simplified proximity (hitbox center) | Yes | No | Replaces edge_bonus + hitbox_center_bonus |
 | Format decay | Yes | No | `format_decay_steps` config |
-| Moving average normalization | Yes | No | `reward_normalization: moving_avg` |
+| Moving average normalization | Yes | Caused collapse | Now bounded; use `group` by default |
 | Per-component normalization | Yes | Partial | Needs format_rewards in batch |
