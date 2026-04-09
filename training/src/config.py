@@ -103,11 +103,11 @@ class GRPOConfig:
     scale_rewards: str = "group"
 
     # Entropy bonus (prevents mode collapse)
-    entropy_coeff: float = 0.01  # weight for entropy bonus in loss
+    entropy_coeff: float = 0.03  # weight for entropy bonus in loss
 
     # Entropy floor (emergency brake against collapse)
-    entropy_floor: float = 0.0       # 0 = disabled; if entropy < floor, extra penalty
-    entropy_floor_coeff: float = 0.5  # strength of the floor penalty
+    entropy_floor: float = 0.8       # 0 = disabled; if entropy < floor, extra penalty
+    entropy_floor_coeff: float = 1.0  # strength of the floor penalty
 
     # Curriculum: two-phase training
     # Phase 1: horizon fixed to 0, shorter completions (learn x,y aiming)
