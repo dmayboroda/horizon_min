@@ -675,8 +675,8 @@ class DuckHuntGRPOTrainer:
         std_r = rewards_t.std()
 
         # Bounded normalization with std floor and clamp to prevent blow-up
-        STD_FLOOR = 0.1
-        ADV_CLAMP = 5.0
+        STD_FLOOR = 0.3
+        ADV_CLAMP = 3.0
 
         # No reward signal in this group: zero advantages so the policy loss
         # contributes nothing, but DO NOT early-return. We still run the forward

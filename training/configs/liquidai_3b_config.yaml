@@ -45,12 +45,12 @@ lora:
   bias: "none"
 
 grpo:
-  num_generations: 6
+  num_generations: 8
   max_completion_length: 40
   temperature: 1.0
   top_p: 0.95
   top_k: 0
-  beta: 0.01                               # small KL anchor to reference model
+  beta: 0.02                               # small KL anchor to reference model
   num_iterations: 1
   epsilon: 0.2
   loss_type: "grpo"
@@ -73,10 +73,10 @@ training:
   max_steps: -1
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 8
-  learning_rate: 5.0e-6                    # lowered for LoRA stability
-  warmup_ratio: 0.05
+  learning_rate: 2.0e-5                    # lowered for LoRA stability
+  warmup_ratio: 0.03
   weight_decay: 0.01
-  lr_scheduler_type: "cosine"
+  lr_scheduler_type: "constant_with_warmup"
   max_grad_norm: 0.3                       # tighter clip to prevent loss spikes
   bf16: true
   fp16: false
