@@ -724,10 +724,14 @@ class DuckHuntGRPOTrainer:
 
         advantages = advantages.to(self.device)
 
-        total_loss = torch.tensor(0.0, device=self.device)
-        total_kl = 0.0
-        total_entropy = 0.0
-        total_clip = 0
+        # Token-level accumulators (sum over ALL tokens in the group, then
+        # divide by the total token count). This removes the length bias of
+        # per-sequence .mean(), which over-weighted shorter completions and
+        # pushed the policy toward shorter, more deterministic outputs.
+        policy_num = torch.tensor(0.0, device=self.device)
+        kl_num = torch.tensor(0.0, device=self.device)
+        entropy_num = torch.tensor(0.0, device=self.device)
+        total_tokens = 0
 
         for i in range(G):
             full_ids = batch["full_ids"][i].unsqueeze(0)  # (1, T)
@@ -751,8 +755,7 @@ class DuckHuntGRPOTrainer:
             # --- 2b. Token-level entropy (prevents mode collapse) ---
             probs = F.softmax(logits, dim=-1)
             log_probs_full = F.log_softmax(logits, dim=-1)
-            entropy = -(probs * log_probs_full).sum(dim=-1).mean()  # scalar
-            total_entropy += entropy.item()
+            entropy_tok = -(probs * log_probs_full).sum(dim=-1)  # (1, comp_len)
 
             # --- 3. Reference log-probs ---
             if self.ref_model is not None:
@@ -763,25 +766,27 @@ class DuckHuntGRPOTrainer:
             else:
                 ref_log_probs = log_probs.detach()
 
-            # --- 4. Policy loss (REINFORCE form, num_iterations=1) ---
-            # With num_iterations=1, PPO clipping is dead (ratio=1 always).
-            # Use direct REINFORCE: -log_prob * advantage.
+            # --- 4. Accumulate token-level terms (no per-sequence mean) ---
             adv = advantages[i]
-            policy_loss = -(log_probs * adv).mean()
+            policy_num = policy_num + -(log_probs * adv).sum()
 
-            # --- 5. KL penalty (Schulman k3 estimator, always ≥ 0) ---
+            # KL (Schulman k3, per-token; always ≥ 0)
             diff = ref_log_probs - log_probs
-            kl = (diff.exp() - 1 - diff).mean()
-            total_kl += kl.item()
+            kl_tok = (diff.exp() - 1 - diff)
+            kl_num = kl_num + kl_tok.sum()
 
-            # --- 6. Entropy bonus (subtract to maximize entropy) ---
-            loss_i = policy_loss + grpo.beta * kl - grpo.entropy_coeff * entropy
-            total_loss = total_loss + loss_i
+            entropy_num = entropy_num + entropy_tok.sum()
+            total_tokens += comp_len
 
-        total_loss = total_loss / max(G, 1)
+        denom = max(total_tokens, 1)
+        policy_loss = policy_num / denom
+        mean_kl_t = kl_num / denom
+        mean_entropy_t = entropy_num / denom
+
+        total_loss = policy_loss + grpo.beta * mean_kl_t - grpo.entropy_coeff * mean_entropy_t
 
         # --- 7. Entropy floor penalty (emergency brake) ---
-        mean_entropy = total_entropy / max(G, 1)
+        mean_entropy = mean_entropy_t.item()
         entropy_floor_penalty = 0.0
         if grpo.entropy_floor > 0 and mean_entropy < grpo.entropy_floor:
             entropy_floor_penalty = grpo.entropy_floor_coeff * (grpo.entropy_floor - mean_entropy)
@@ -795,7 +800,7 @@ class DuckHuntGRPOTrainer:
             "loss": total_loss.item(),
             "mean_reward": mean_r.item(),
             "std_reward": std_r.item(),
-            "mean_kl": total_kl / max(G, 1),
+            "mean_kl": mean_kl_t.item(),
             "mean_entropy": mean_entropy,
             "entropy_floor_penalty": entropy_floor_penalty,
             "advantages_mean": advantages.mean().item(),
