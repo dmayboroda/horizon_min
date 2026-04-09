@@ -373,9 +373,21 @@ def main() -> None:
         default=None,
         help="HF Hub repo id, e.g. 'username/duckhunt-ministral-grpo'.",
     )
+    parser.add_argument(
+        "--latency-ms",
+        type=int,
+        default=None,
+        help="Force a single fixed processing-time latency (ms). "
+             "Overrides environment.latency_options_ms to [value].",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args)
+
+    # Force a single latency value if requested
+    if args.latency_ms is not None:
+        cfg.environment.latency_options_ms = [args.latency_ms]
+        logger.info("Latency pinned to single value: %d ms", args.latency_ms)
 
     # Apply HF Hub CLI overrides
     if args.push_to_hub:
