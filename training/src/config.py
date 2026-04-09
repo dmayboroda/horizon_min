@@ -175,7 +175,7 @@ class RewardConfig:
     # Environment rewards (from duck_hunt_openenv config)
     hit: float = 1.0
     double_kill: float = 2.5
-    miss: float = -0.3
+    miss: float = -0.1
     shoot_nothing: float = -0.5
     lambda_horizon: float = 0.4
     lambda_horizon_miss: float = 0.2
@@ -189,8 +189,8 @@ class RewardConfig:
     shoot_dead_duck: float = -0.7
 
     # Distance-based reward shaping (proximity bonus on miss)
-    proximity_bonus: float = 0.5  # max bonus when shot is close to duck
-    proximity_decay: float = 5.0  # how fast bonus decays with distance
+    proximity_bonus: float = 1.0  # max bonus when shot is close to duck
+    proximity_decay: float = 3.0  # how fast bonus decays with distance
 
     # Max horizon (for penalty normalisation)
     max_horizon: int = 30

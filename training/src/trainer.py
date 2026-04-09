@@ -674,28 +674,18 @@ class DuckHuntGRPOTrainer:
         mean_r = rewards_t.mean()
         std_r = rewards_t.std()
 
-        # Skip update entirely if no signal in this group
-        if std_r < 1e-6:
-            metrics = {
-                "loss": 0.0,
-                "mean_reward": mean_r.item(),
-                "std_reward": std_r.item(),
-                "mean_kl": 0.0,
-                "mean_entropy": 0.0,
-                "entropy_floor_penalty": 0.0,
-                "advantages_mean": 0.0,
-                "advantages_std": 0.0,
-                "advantages_max": 0.0,
-                "advantages_min": 0.0,
-                "skipped": True,
-            }
-            return None, metrics
-
         # Bounded normalization with std floor and clamp to prevent blow-up
         STD_FLOOR = 0.1
         ADV_CLAMP = 5.0
 
-        if norm_mode == "moving_avg":
+        # No reward signal in this group: zero advantages so the policy loss
+        # contributes nothing, but DO NOT early-return. We still run the forward
+        # pass so the entropy bonus (+ KL anchor) provides exploration pressure.
+        zero_signal = bool(std_r < 1e-6)
+        if zero_signal:
+            advantages = torch.zeros(G, dtype=torch.float32)
+
+        elif norm_mode == "moving_avg":
             alpha = self.cfg.reward.moving_avg_alpha
             self._reward_baseline = (1 - alpha) * self._reward_baseline + alpha * mean_r.item()
             centered = rewards_t - self._reward_baseline
@@ -812,6 +802,7 @@ class DuckHuntGRPOTrainer:
             "advantages_std": advantages.std().item() if G > 1 else 0.0,
             "advantages_max": advantages.max().item(),
             "advantages_min": advantages.min().item(),
+            "zero_signal": zero_signal,
         }
 
         return total_loss, metrics

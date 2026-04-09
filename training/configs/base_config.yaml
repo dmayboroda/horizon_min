@@ -74,11 +74,11 @@ training:
 reward:
   hit: 1.0
   double_kill: 2.5
-  miss: -0.3
+  miss: -0.1
   shoot_nothing: -0.5
   lambda_horizon: 0.1
-  proximity_bonus: 0.5
-  proximity_decay: 5.0
+  proximity_bonus: 1.0
+  proximity_decay: 3.0
   bonus_perfect_match: 0.5
   bonus_perfect_round: 2.0
   format_weight: 0.3

@@ -101,10 +101,10 @@ environment:
 reward:
   hit: 1.0
   double_kill: 2.5
-  miss: -0.3
+  miss: -0.1
   shoot_nothing: -0.5
   lambda_horizon: 0.1
-  proximity_bonus: 0.5                     # stronger signal for close shots
+  proximity_bonus: 1.0                     # stronger signal for close shots
   proximity_decay: 3.0                     # slower decay — wider gradient catchment
   format_weight: 0.3
   accuracy_weight: 1.0
