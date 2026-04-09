@@ -101,7 +101,6 @@ reward:
   hitbox_center_bonus: 0.5
   hotspot_enabled: true
   skip_invalid_generations: false              # model needs format learning initially
-  skip_no_target: true
   format_weight: 0.3
   accuracy_weight: 1.0
 

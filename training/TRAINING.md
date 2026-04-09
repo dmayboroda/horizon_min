@@ -178,14 +178,12 @@ python train.py --config configs/liquidai_config.yaml --custom \
 python train.py --config configs/liquidai_3b_config.yaml --custom \
     --override training.max_steps=25000 \
     --override grpo.curriculum_phase2_step=15000 \
-    --override reward.skip_no_target=true \
     --override logging.wandb_run_name="lfm2-3b-grpo"
 
 # Qwen3-VL-8B
 python train.py --config configs/qwen3_vl_8b_config.yaml --custom \
     --override training.max_steps=25000 \
     --override grpo.curriculum_phase2_step=15000 \
-    --override reward.skip_no_target=true \
     --override model.attn_implementation=sdpa \
     --override model.quantization=null \
     --override logging.wandb_run_name="qwen3-8b-grpo"
@@ -199,7 +197,6 @@ accelerate launch --num_processes=2 --mixed_precision=bf16 \
     train.py --config configs/liquidai_3b_config.yaml --custom \
     --override training.max_steps=25000 \
     --override grpo.curriculum_phase2_step=15000 \
-    --override reward.skip_no_target=true \
     --override logging.wandb_run_name="lfm2-3b-2gpu"
 
 # Qwen3-VL-8B on 2 GPUs with flash attention
@@ -207,7 +204,6 @@ accelerate launch --num_processes=2 --mixed_precision=bf16 \
     train.py --config configs/qwen3_vl_8b_config.yaml --custom \
     --override training.max_steps=25000 \
     --override grpo.curriculum_phase2_step=15000 \
-    --override reward.skip_no_target=true \
     --override model.quantization=null \
     --override grpo.temperature=1.5 \
     --override grpo.entropy_coeff=0.005 \
@@ -223,7 +219,6 @@ python train.py --config configs/liquidai_3b_config.yaml --custom \
     --override model.model_name=outputs/sft_3b_merged \
     --override training.max_steps=15000 \
     --override grpo.curriculum_phase2_step=10000 \
-    --override reward.skip_no_target=true \
     --override reward.skip_invalid_generations=true \
     --override reward.format_weight=0.0 \
     --override logging.wandb_run_name="grpo-after-sft"
@@ -274,7 +269,6 @@ accelerate launch --num_processes=2 --mixed_precision=bf16 \
     --override model.model_name=outputs/sft_3b_merged \
     --override training.max_steps=15000 \
     --override grpo.curriculum_phase2_step=10000 \
-    --override reward.skip_no_target=true \
     --override reward.skip_invalid_generations=true \
     --override reward.format_weight=0.0 \
     --override logging.wandb_run_name="grpo-after-sft" \
@@ -305,7 +299,6 @@ Any config value can be overridden from the command line:
 --override reward.hitbox_center_bonus=0.5
 --override reward.edge_bonus=0.3
 --override reward.skip_invalid_generations=true
---override reward.skip_no_target=true
 --override reward.format_weight=0.0
 --override reward.hotspot_enabled=true
 --override model.quantization=null

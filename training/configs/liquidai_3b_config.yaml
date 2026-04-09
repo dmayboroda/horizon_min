@@ -108,7 +108,6 @@ reward:
   hitbox_center_bonus: 0.5                 # reward precision — hitting center of duck
   hotspot_enabled: true                    # target-aware hotspot (skips if near duck)
   skip_invalid_generations: false          # keep invalid gens — model needs format learning
-  skip_no_target: true                     # skip impossible shots (ducks escaped)
   format_weight: 0.3                       # tool call correctness reward
   accuracy_weight: 1.0
   reward_normalization: "group"            # group / moving_avg / per_component

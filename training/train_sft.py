@@ -358,7 +358,15 @@ def train_sft(
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=0.01)
 
-    total_steps = (len(records) * num_epochs) // grad_accum
+    # Scheduler total steps = optimizer steps (not raw loop iterations)
+    # In distributed mode, Accelerate wraps the scheduler and may step it
+    # per-process, so use the per-rank optimizer step count.
+    samples_per_rank = len(records)
+    optimizer_steps_per_epoch = samples_per_rank // grad_accum
+    total_steps = optimizer_steps_per_epoch * num_epochs
+    # Multiply by world_size — Accelerate scales scheduler stepping in multi-GPU
+    if distributed and world_size > 1:
+        total_steps = total_steps * world_size
     warmup_steps = int(total_steps * warmup_ratio)
 
     scheduler = get_scheduler(

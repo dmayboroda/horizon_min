@@ -246,7 +246,6 @@ accelerate launch --num_processes=2 --mixed_precision=bf16 \
     train.py --config configs/liquidai_3b_config.yaml --custom \
     --override training.max_steps=25000 \
     --override grpo.curriculum_phase2_step=15000 \
-    --override reward.skip_no_target=true \
     --override reward.format_decay_steps=1000 \
     --override reward.reward_normalization=moving_avg \
     --override logging.wandb_run_name="lfm2-3b-moving-avg"

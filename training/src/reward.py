@@ -64,16 +64,20 @@ def compute_reward_detailed(
     bd.duck_b_state = result.get("duck_b_state", "unknown")
 
     # ---- no ducks were flying at observation time ----
+    # Should NOT happen: _collect_batch retries until a flying duck is found.
+    # Safety fallback returns neutral reward.
     if not had_target:
-        bd.total = config.shoot_nothing
-        bd.base = config.shoot_nothing
+        bd.total = 0.0
+        bd.base = 0.0
         bd.outcome = "shoot_nothing"
         return bd
 
     # ---- ducks escaped/fell during latency+horizon (shot too late) ----
+    # Should NOT happen: _collect_batch simulates forward and retries if ducks
+    # would escape during latency. Safety fallback returns neutral reward.
     if not had_target_at_shot and not (hit_a or hit_b):
-        bd.total = config.shoot_dead_duck
-        bd.base = config.shoot_dead_duck
+        bd.total = 0.0
+        bd.base = 0.0
         bd.outcome = "shoot_dead"
         return bd
 

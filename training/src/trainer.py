@@ -430,35 +430,61 @@ class DuckHuntGRPOTrainer:
         grpo = self.cfg.grpo
         G = grpo.num_generations
 
-        # Force a new match every step for diverse duck positions
-        self.env.auto_advance_to_next_match()
+        # Retry until we find a valid state:
+        # 1. Duck flying at observation time
+        # 2. Duck still flying AFTER latency (doesn't escape during processing)
+        for _attempt in range(50):
+            self.env.auto_advance_to_next_match()
 
-        # Randomize latency every step (not just on reset)
-        self.env._env.latency_ms = random.choice(self.env.config.latency_options_ms)
-        self.env._env.latency_frames = int(
-            self.env._env.latency_ms / 1000 * self.env.config.fps
-        )
+            # Randomize latency every attempt
+            self.env._env.latency_ms = random.choice(self.env.config.latency_options_ms)
+            self.env._env.latency_frames = int(
+                self.env._env.latency_ms / 1000 * self.env.config.fps
+            )
 
-        # Advance a few frames so ducks enter the screen from off-screen spawn
-        self.env.advance_frames(random.randint(8, 25))
+            self.env.advance_frames(random.randint(8, 25))
 
-        # Verify we have flying ducks (retry aggressively)
-        for _attempt in range(30):
             frames = self.env.get_frames()
             state = self.env.get_state()
             flying = state.get("ducks_flying", 0)
-            if flying >= 1 and len(frames) > 0:
-                break
-            if self.env.is_done():
-                self.env.reset()
-            # Try advancing, or start a completely new match
-            if _attempt < 15:
-                self.env.advance_frames(random.randint(5, 15))
-            else:
-                self.env.auto_advance_to_next_match()
-                self.env.advance_frames(random.randint(8, 25))
+
+            if flying < 1 or len(frames) == 0:
+                if self.env.is_done():
+                    self.env.reset()
+                continue
+
+            # Verify ducks will STILL be flying after latency (no shoot_dead outcomes)
+            from .dataset import _snapshot_duck, _restore_duck
+            inner = self.env._env
+            match = inner.round.current_match
+            latency_frames = inner.latency_frames
+            round_number = inner.round_number
+
+            # Snapshot current ducks
+            duck_a_snap = _snapshot_duck(match.duck_a)
+            duck_b_snap = _snapshot_duck(match.duck_b) if match.duck_b is not None else None
+
+            # Save RNG, simulate forward, check if ducks still flying
+            rng_state = random.getstate()
+            from game_engine import DuckState
+            duck_a_sim = _restore_duck(duck_a_snap, round_number)
+            duck_b_sim = _restore_duck(duck_b_snap, round_number) if duck_b_snap else None
+            for _ in range(latency_frames):
+                duck_a_sim.update(round_number)
+                if duck_b_sim is not None:
+                    duck_b_sim.update(round_number)
+            random.setstate(rng_state)  # restore RNG so training isn't affected
+
+            still_flying_after_latency = (
+                duck_a_sim.state == DuckState.FLYING
+                or (duck_b_sim is not None and duck_b_sim.state == DuckState.FLYING)
+            )
+
+            if still_flying_after_latency:
+                break  # valid state found
+            # Otherwise retry with new match
         else:
-            logger.warning("Could not find flying ducks after 30 attempts, using current state")
+            logger.warning("Could not find valid state after 50 attempts, using current state")
 
         # Build prompt (phase 1 = no horizon in tool schema for LiquidAI)
         messages, tools = build_prompt(frames, state, phase=self._current_phase)
@@ -592,15 +618,11 @@ class DuckHuntGRPOTrainer:
         # Advance the real environment (larger range for diverse states)
         self.env.advance_frames(random.randint(15, 60))
 
-        # Optionally filter out noisy generations from GRPO
+        # Optionally filter out invalid (unparseable) generations from GRPO
         skip_mask = [False] * G
         if self.cfg.reward.skip_invalid_generations:
             for idx in range(G):
                 if parsed_actions[idx] is None:
-                    skip_mask[idx] = True
-        if self.cfg.reward.skip_no_target:
-            for idx in range(G):
-                if reward_breakdowns[idx].outcome in ("shoot_nothing", "shoot_dead"):
                     skip_mask[idx] = True
 
         if any(skip_mask) and not all(skip_mask):

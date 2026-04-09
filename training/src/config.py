@@ -204,9 +204,6 @@ class RewardConfig:
     # Skip invalid generations in GRPO (exclude unparseable outputs from advantage computation)
     skip_invalid_generations: bool = False  # true = drop invalid gens instead of giving -1.0
 
-    # Skip no-target generations (shoot_nothing, shoot_dead_duck) — model couldn't have known
-    skip_no_target: bool = False  # true = exclude these from GRPO advantage computation
-
     # Format reward (structured output)
     format_weight: float = 0.3
     format_decay_steps: int = 0  # 0 = no decay; steps over which format_weight decays to 0

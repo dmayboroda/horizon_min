@@ -317,7 +317,7 @@ reward:
 
 ## 4.7 Generation Filtering (noise reduction)
 
-The trainer can optionally **skip noisy generations** from the GRPO advantage computation instead of including them with negative rewards. This prevents irrelevant signals from drowning out the aiming gradient.
+The trainer can optionally **skip noisy generations** from the GRPO advantage computation.
 
 ### Skip invalid generations
 
@@ -325,26 +325,26 @@ When `skip_invalid_generations: true`, generations with unparseable output (safe
 
 **Why**: once the model already produces valid tool calls 95%+ of the time, the occasional refusal creates a huge reward outlier (-1.0 vs ~-0.1) that dominates the advantage computation. The gradient says "don't refuse" instead of "aim better."
 
-### Skip no-target generations
+### No-target filtering (automatic, upstream)
 
-When `skip_no_target: true`, generations where ducks escaped during processing time (`shoot_nothing`, `shoot_dead_duck`) are dropped. The model saw ducks when it started processing but they were gone by the time the shot landed — this is not the model's fault.
+`shoot_nothing` and `shoot_dead` outcomes are **prevented at the source**: `_collect_batch` retries until a flying duck is found at observation time AND will still be flying after `latency_frames`. The simulation uses the snapshot + RNG state to forecast duck positions deterministically.
 
-**Why**: penalizing the model for impossible shots adds noise. The model can't learn to avoid something it couldn't predict (ducks escaping during latency). Skipping these keeps GRPO focused on hit/miss comparisons.
+Rather than dropping bad generations after the fact, they never enter the pipeline.
 
 ### How filtering works
 
 ```
-6 generations → filter → 4 remaining → compute advantages on 4
+6 generations → filter → 5 remaining → compute advantages on 5
 
 Example:
-  gen 0: miss (valid, ducks present)     → KEEP
-  gen 1: hit  (valid, ducks present)     → KEEP
-  gen 2: "I'm sorry..." (invalid)        → SKIP (skip_invalid_generations)
-  gen 3: miss (valid, ducks present)     → KEEP
-  gen 4: shoot_nothing (ducks escaped)   → SKIP (skip_no_target)
-  gen 5: miss (valid, ducks present)     → KEEP
+  gen 0: miss (valid)              → KEEP
+  gen 1: hit  (valid)              → KEEP
+  gen 2: "I'm sorry..." (invalid)  → SKIP (skip_invalid_generations)
+  gen 3: miss (valid)              → KEEP
+  gen 4: miss (valid)              → KEEP
+  gen 5: hit  (valid)              → KEEP
 
-  GRPO computes advantages over [gen 0, 1, 3, 5] only
+  GRPO computes advantages over [gen 0, 1, 3, 4, 5] only
 ```
 
 If ALL generations would be filtered, no filtering is applied (keeps the full batch to avoid empty batches).
@@ -353,7 +353,6 @@ If ALL generations would be filtered, no filtering is applied (keeps the full ba
 ```yaml
 reward:
   skip_invalid_generations: true   # drop unparseable outputs from GRPO
-  skip_no_target: true             # drop impossible shots from GRPO
 ```
 
 ## 5. Combined Reward
@@ -578,7 +577,6 @@ python train.py --config configs/liquidai_3b_config.yaml --custom \
     --override reward.edge_bonus=0.3 \
     --override reward.hitbox_center_bonus=0.5 \
     --override reward.skip_invalid_generations=true \
-    --override reward.skip_no_target=true \
     --override reward.format_weight=0.0 \
     --override logging.wandb_run_name="lfm2-3b-grpo" \
     --push-to-hub --hub-model-id dmayboroda/duckhunt_liquidai_3b_grpo
@@ -599,7 +597,6 @@ python train.py --config configs/liquidai_3b_config.yaml --custom \
     --override reward.edge_bonus=0.3 \
     --override reward.hitbox_center_bonus=0.5 \
     --override reward.skip_invalid_generations=true \
-    --override reward.skip_no_target=true \
     --override reward.format_weight=0.0 \
     --override logging.wandb_run_name="lfm2-3b-precision-resume" \
     --push-to-hub --hub-model-id dmayboroda/duckhunt_liquidai_3b_grpo \
@@ -626,7 +623,6 @@ python train.py --config configs/liquidai_3b_config.yaml --custom \
     --override reward.format_weight=0.0 \
     --override reward.hitbox_center_bonus=0.5 \
     --override reward.skip_invalid_generations=true \
-    --override reward.skip_no_target=true \
     --resume outputs/lfm2_3b_duckhunt_grpo/checkpoint-XXXX
 ```
 
@@ -688,7 +684,6 @@ Any config value can be overridden with `--override section.key=value`:
 --override reward.lambda_horizon=0.3
 --override reward.hitbox_center_bonus=0.5
 --override reward.skip_invalid_generations=true
---override reward.skip_no_target=true
 ```
 
 ## 12. Config Reference
@@ -709,7 +704,6 @@ reward:
   hitbox_center_bonus: 0.5   # 0 = disabled; max bonus for hitting center of duck
   hotspot_enabled: true      # false to disable hotspot penalty entirely
   skip_invalid_generations: true   # drop unparseable outputs from GRPO
-  skip_no_target: true             # drop impossible shots (ducks escaped) from GRPO
   format_weight: 0.0         # 0 when model already learned tool calls
   format_decay_steps: 0      # 0 = no decay; N = linearly decay to 0 over N steps
   accuracy_weight: 1.0       # weight for accuracy reward in total
@@ -759,7 +753,7 @@ training:
 | Hit rate flat at ~20% (3B model) | Hotspot penalty killing legit hits; no precision reward | Disable hotspot or use target-aware version; add `hitbox_center_bonus=0.5` |
 | Model hits but doesn't improve precision | All hits get same reward regardless of accuracy | Add `hitbox_center_bonus=0.5` — center hits get more reward than edge hits |
 | Safety refusals dominating GRPO signal | -1.0 invalid reward creates huge outlier advantage | Enable `skip_invalid_generations=true` |
-| Model penalized for ducks escaping during latency | -0.5/-0.7 for impossible shots adds noise | Enable `skip_no_target=true` |
+| Model penalized for ducks escaping during latency | No longer possible | Auto-handled: `_collect_batch` retries with upstream latency validation |
 | Model already knows format but format_weight > 0 | Format reward is constant for all gens, adds no GRPO signal | Set `format_weight=0.0` for precision-focused training |
 | Multi-GPU: `device_map="auto"` error with DDP | device_map uses model parallelism, DDP needs full model per GPU | Auto-handled: trainer disables device_map when `WORLD_SIZE > 1` |
 | Multi-GPU: `model.generate()` fails | DDP wrapper doesn't support generate | Auto-handled: trainer uses `_unwrap_model().generate()` |
