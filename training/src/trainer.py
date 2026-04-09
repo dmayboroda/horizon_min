@@ -108,7 +108,10 @@ class DuckHuntGRPOTrainer:
         )
         logger.info(
             "Scheduler: %d optimizer steps, %d warmup steps (from %d loop steps, grad_accum=%d)",
-            total_optimizer_steps, warmup_optimizer_steps, total_steps, train.gradient_accumulation_steps,
+            total_optimizer_steps, 
+            warmup_optimizer_steps, 
+            total_steps, 
+            train.gradient_accumulation_steps,
         )
 
         # Wrap with Accelerate for distributed training
